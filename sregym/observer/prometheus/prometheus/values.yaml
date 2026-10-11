@@ -265,7 +265,15 @@ server:
 
   ## Additional Prometheus server container arguments
   ##
-  extraArgs: {}
+  # CIROOS FIX: accept OTLP metric pushes. astronomy-shop's bundled OTel collector exports metrics to
+  # Prometheus's OTLP endpoint, but that endpoint is gated behind a feature flag, so without this the
+  # exports 404 and the app's metrics never reach Prometheus at all. Chart appVersion is v2.47.2,
+  # where the flag is `--enable-feature=otlp-write-receiver` (it was renamed to
+  # `--web.enable-otlp-receiver` only in later releases — do not use that spelling here).
+  # Paired with the endpoint repoint in
+  # SREGym-applications/astronomy-shop/charts/opentelemetry-demo/values.yaml.
+  extraArgs:
+    enable-feature: otlp-write-receiver
 
   ## Additional InitContainers to initialize the pod
   ##
