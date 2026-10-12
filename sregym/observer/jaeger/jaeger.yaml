@@ -78,12 +78,27 @@ spec:
         # Jaeger for every app namespace; 25000 matches the bound the
         # astronomy-shop chart already applies to its own Jaeger.
         - "--memory.max-traces=25000"
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
-            memory: 1Gi
+        # NO resources block, deliberately — matching the benchmark.
+        #
+        # There used to be `limits: memory: 1Gi` here. Upstream SREGym sets no resource limits on
+        # this Deployment at all, and its own astronomy-shop chart runs all-in-one with
+        # `--memory.max-traces=5000` and no limit either. So a cap on the span store is
+        # benchmark-idiomatic; a memory *limit* appears nowhere in SREGym and was purely ours.
+        #
+        # That limit was also actively harmful. all-in-one keeps spans IN MEMORY, 25000
+        # astronomy-shop traces cost ~1.1Gi, so 1Gi sat just under the cap and the OOM killer
+        # enforced it instead: OOMKilled twice on 2026-10-11/12 (exit 137), each time wiping every
+        # span AND the whole service catalogue. The failure is SILENT — icecream still returns
+        # HTTP 200 and the trace query answers "No services found in Jaeger", which an RCA reads as
+        # "no trace evidence exists" rather than as infra.
+        #
+        # Under an active sweep it OOMed in ~5h, not the ~17h that idle uptime suggested — trace
+        # volume tracks loadgen traffic, so do not size this from an idle observation.
+        #
+        # max-traces stays as the real bound (~1.1Gi, far under the control-plane node's headroom),
+        # which is stricter than upstream's unbounded default while removing the OOM entirely.
+        # Do NOT patch this at runtime with `kubectl set resources`: the conductor re-applies this
+        # manifest on every env setup and silently reverts it.
         ports:
         - containerPort: 5775
           protocol: UDP
