@@ -7,6 +7,8 @@ from pathlib import Path
 
 MODEL_ENV = "AGENT_JEV_MODEL"
 KEY_ENV = "TYPESAFE_API_KEY"
+SUPPORTED_AGENTS = {"codex", "claudecode"}
+CLAUDE_TOOLS = ["mcp__jev__jev_plan", "mcp__jev__jev_submit"]
 
 INSTRUCTION = """
 DECISION SUPPORT
@@ -62,8 +64,8 @@ def configure(args) -> None:
         return
     if not model.strip():
         raise ValueError("--jev-model must not be empty")
-    if args.agent != "codex" or args.use_external_harness:
-        raise ValueError("--jev-model requires the built-in Codex agent")
+    if args.agent not in SUPPORTED_AGENTS or args.use_external_harness:
+        raise ValueError("--jev-model requires the built-in Codex or Claude Code agent")
     if not os.environ.get(KEY_ENV, "").strip():
         raise ValueError("--jev-model requires TYPESAFE_API_KEY")
     if not args.force_build:
@@ -104,3 +106,20 @@ def codex_args(logs_dir: Path) -> list[str]:
         "enabled_tools": ["jev_plan", "jev_submit"],
     }
     return [arg for name, value in values.items() for arg in ("-c", f"mcp_servers.jev.{name}={json.dumps(value)}")]
+
+
+def claude_args(logs_dir: Path) -> list[str]:
+    """Configure only this Claude Code process; never edit the user's settings or .mcp.json."""
+    if not os.environ.get(MODEL_ENV):
+        return []
+    if not os.environ.get(KEY_ENV, "").strip():
+        raise ValueError("Jev requires TYPESAFE_API_KEY")
+    # Claude Code passes its own environment to stdio servers, so the credential,
+    # proxy, and CA variables are inherited rather than written into this config:
+    # the command line is logged and must never carry the key.
+    server = {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "clients.jev.server", "--log-path", str(logs_dir.resolve() / "jev_calls.jsonl")],
+    }
+    return ["--mcp-config", json.dumps({"mcpServers": {"jev": server}}), "--strict-mcp-config"]

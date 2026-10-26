@@ -10,6 +10,9 @@ import subprocess
 from pathlib import Path
 
 from clients.harness.token_usage import aggregate_usage, read_jsonl, sum_counts, token_count, usage_metrics
+from clients.jev.config import CLAUDE_TOOLS as JEV_TOOLS
+from clients.jev.config import MODEL_ENV as JEV_MODEL_ENV
+from clients.jev.config import claude_args as jev_claude_args
 
 logger = logging.getLogger("all.claudecode.agent")
 
@@ -110,6 +113,8 @@ class ClaudeCodeAgent:
         if os.environ.get("AGENT_INTERNET_ACCESS") == "filtered":
             tools.remove("WebFetch")
             tools.remove("WebSearch")
+        if os.environ.get(JEV_MODEL_ENV):
+            tools.extend(JEV_TOOLS)
         return tools
 
     def __init__(
@@ -342,6 +347,7 @@ class ClaudeCodeAgent:
         ]
         if reasoning_effort:
             command.extend(["--effort", reasoning_effort])
+        command.extend(jev_claude_args(self.logs_dir))
         command.extend(["--allowedTools", *self.allowed_tools()])
 
         logger.info(f"Executing command: {' '.join(command)}")

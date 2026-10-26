@@ -1088,7 +1088,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--jev-model",
         default=None,
-        help="Enable experimental Jev decision support for Codex (e.g. jev-latest). Requires TYPESAFE_API_KEY and --force-build.",
+        help="Enable experimental Jev decision support for Codex or Claude Code (e.g. jev-latest). Requires TYPESAFE_API_KEY and --force-build.",
     )
     parser.add_argument(
         "--use-external-harness", action="store_true", help="For use in external harnesses, deploy the fault and exit."

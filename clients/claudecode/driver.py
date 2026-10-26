@@ -15,6 +15,9 @@ import requests
 
 from clients.claudecode.claudecode_agent import ClaudeCodeAgent
 from clients.harness.problem_id import resolve_problem_id
+from clients.jev.config import INSTRUCTION as JEV_INSTRUCTION
+from clients.jev.config import MODEL_ENV as JEV_MODEL_ENV
+from clients.jev.config import SUBMISSION_INSTRUCTION as JEV_SUBMISSION_INSTRUCTION
 from logger import init_logger
 
 # Add SREGym root to path
@@ -40,6 +43,12 @@ def run_preflight() -> None:
     env = os.environ.copy()
     if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop("ANTHROPIC_API_KEY", None)
+
+    if os.environ.get(JEV_MODEL_ENV):
+        from clients.jev.server import run_preflight as jev_preflight
+
+        logs = Path(os.environ.get("AGENT_LOGS_DIR", "/logs"))
+        jev_preflight(logs / "jev_preflight.jsonl")
 
     command = ["claude", "-p", "say ok", "--model", m]
     reasoning_effort = os.environ.get("AGENT_REASONING_EFFORT")
@@ -155,6 +164,23 @@ def build_instruction(app_info: dict) -> str:
     else:
         namespace_block = f"Namespace: {namespaces[0]}"
 
+    submission_instruction = (
+        JEV_SUBMISSION_INSTRUCTION
+        if os.environ.get(JEV_MODEL_ENV)
+        else f"""HOW TO SUBMIT:
+
+The submission endpoint is: {get_api_base_url()}/submit
+
+For DIAGNOSIS stage:
+- Submit with a natural language description of the issue
+- Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "The frontend service is crashing due to missing environment variable"}}
+
+For MITIGATION stage:
+- Submit with an EMPTY STRING after you have applied the fix
+- POST {get_api_base_url()}/submit with JSON: {{"solution": ""}}
+"""
+    ).rstrip("\n")
+
     # Build instruction similar to how it would be done in Harbor
     instruction = f"""You are an SRE agent tasked with diagnosing and fixing issues in a Kubernetes application.
 
@@ -180,17 +206,7 @@ TASK 2: MITIGATION
 - Your mitigation is evaluated on whether the application is healthy after your changes
 - Your fix is also evaluated on whether it addresses the root cause, not just the symptoms
 
-HOW TO SUBMIT:
-
-The submission endpoint is: {get_api_base_url()}/submit
-
-For DIAGNOSIS stage:
-- Submit with a natural language description of the issue
-- Example: POST {get_api_base_url()}/submit with JSON: {{"solution": "The frontend service is crashing due to missing environment variable"}}
-
-For MITIGATION stage:
-- Submit with an EMPTY STRING after you have applied the fix
-- POST {get_api_base_url()}/submit with JSON: {{"solution": ""}}
+{submission_instruction}
 
 Important:
 - You have access to kubectl commands to inspect and modify resources in namespace(s): {", ".join(namespaces)}
@@ -198,6 +214,8 @@ Important:
 - The conductor API is available at {get_api_base_url()}
 """
 
+    if os.environ.get(JEV_MODEL_ENV):
+        instruction += JEV_INSTRUCTION
     logger.info(f"Built instruction:\n{instruction}")
     return instruction
 

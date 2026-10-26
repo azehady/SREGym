@@ -595,7 +595,10 @@ def test_configuration_validation_and_reset(monkeypatch):
     configure(args)
     assert __import__("os").environ[MODEL_ENV] == "jev-test"
     args.agent = "claudecode"
-    with pytest.raises(ValueError, match="Codex"):
+    configure(args)
+    assert __import__("os").environ[MODEL_ENV] == "jev-test"
+    args.agent = "stratus"
+    with pytest.raises(ValueError, match="Codex or Claude Code"):
         configure(args)
     args.jev_model = None
     configure(args)
@@ -636,3 +639,21 @@ def test_container_forwards_only_when_enabled(monkeypatch):
     assert f"{KEY_ENV}=test-key" in runner._build_env_flags()
     runner.config.forward_host_credentials = False
     assert not any(KEY_ENV in v for v in runner._build_env_flags())
+
+
+def test_claude_args_attach_jev_without_exposing_the_key(monkeypatch, tmp_path):
+    from clients.claudecode.claudecode_agent import ClaudeCodeAgent
+    from clients.jev.config import claude_args
+
+    monkeypatch.delenv(MODEL_ENV, raising=False)
+    assert claude_args(tmp_path) == []
+    assert "mcp__jev__jev_plan" not in ClaudeCodeAgent.allowed_tools()
+
+    monkeypatch.setenv(MODEL_ENV, "jev-test")
+    monkeypatch.setenv(KEY_ENV, "secret-key-value")
+    args = claude_args(tmp_path)
+    assert args[0] == "--mcp-config" and args[-1] == "--strict-mcp-config"
+    server = json.loads(args[1])["mcpServers"]["jev"]
+    assert server["args"][:2] == ["-m", "clients.jev.server"]
+    assert not any("secret-key-value" in arg for arg in args)
+    assert {"mcp__jev__jev_plan", "mcp__jev__jev_submit"} <= set(ClaudeCodeAgent.allowed_tools())
