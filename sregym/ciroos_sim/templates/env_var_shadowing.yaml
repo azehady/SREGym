@@ -1,0 +1,19 @@
+id: env_var_shadowing
+mechanism: A duplicate env key shadows the intended earlier value
+category: Misconfiguration Failure
+fault_level: Container
+primitive: env_variable_shadowing
+symptom_class: wrong-upstream-while-Ready
+requires:
+  min_env_keys: 1
+params:
+  difficulty: hard
+  observable: pod stays Running and Ready
+mutation:
+  op: duplicate_env
+  value_from: shadow_pool
+root_cause_template: Container `{container}` defines `{env_key}` twice. The later value `{bad_value}`
+  shadows the intended value, so {workload} resolves the wrong target even though its pod stays Running
+  and Ready.
+public_instances:
+- env_variable_shadowing_astronomy_shop

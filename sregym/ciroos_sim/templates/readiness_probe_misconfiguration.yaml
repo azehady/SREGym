@@ -1,0 +1,17 @@
+id: readiness_probe_misconfiguration
+mechanism: Readiness probe never passes, so endpoints stay empty
+category: Misconfiguration Failure
+fault_level: Cluster Management
+primitive: readiness_probe_misconfiguration
+symptom_class: service-has-no-endpoints
+requires:
+  has_readiness: true
+params:
+  difficulty: medium
+  observable: pod Running but never Ready; Service endpoints empty
+mutation:
+  op: repoint_readiness_port
+  value_from: unused_port
+root_cause_template: The readiness probe on container `{container}` in {workload} targets port `{bad_value}`,
+  so the pod never becomes Ready and its Service keeps zero endpoints.
+public_instances: []

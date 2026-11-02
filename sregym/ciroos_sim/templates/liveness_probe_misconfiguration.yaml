@@ -1,0 +1,20 @@
+id: liveness_probe_misconfiguration
+mechanism: Liveness probe points at a port that serves nothing
+category: Misconfiguration Failure
+fault_level: Cluster Management
+primitive: liveness_probe_misconfiguration
+symptom_class: continuous-restart-loop
+requires:
+  has_liveness: true
+params:
+  difficulty: easy
+  observable: CrashLoopBackOff / restart count climbing
+mutation:
+  op: repoint_liveness_port
+  value_from: unused_port
+root_cause_template: The liveness probe on container `{container}` in {workload} targets port `{bad_value}`,
+  which serves nothing, so kubelet restarts the pod continuously.
+public_instances:
+- liveness_probe_misconfiguration_astronomy_shop
+- liveness_probe_misconfiguration_hotel_reservation
+- liveness_probe_misconfiguration_social_network

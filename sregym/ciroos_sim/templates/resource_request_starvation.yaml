@@ -1,0 +1,17 @@
+id: resource_request_starvation
+mechanism: Resource requests raised beyond allocatable so pods cannot schedule
+category: Cloud Management System Failure
+fault_level: Cluster Management
+primitive: resource_request
+symptom_class: pods-pending-unschedulable
+requires:
+  has_resources: true
+params:
+  difficulty: easy
+  observable: Pending pods, FailedScheduling events
+mutation:
+  op: inflate_requests
+  value_from: oversized_resources
+root_cause_template: Container `{container}` in {workload} requests `{bad_value}`, which exceeds node
+  allocatable, so its pods stay Pending with FailedScheduling.
+public_instances: []

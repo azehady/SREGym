@@ -1,0 +1,17 @@
+id: missing_env_variable
+mechanism: A required env key is removed from the container
+category: Misconfiguration Failure
+fault_level: Container
+primitive: missing_env_variable
+symptom_class: startup-or-dependency-failure
+requires:
+  min_env_keys: 1
+params:
+  difficulty: medium
+  observable: errors referencing the missing key
+mutation:
+  op: remove_env
+root_cause_template: The `{env_key}` environment variable is missing from container `{container}` in {workload},
+  so it cannot resolve its dependency.
+public_instances:
+- missing_env_variable_astronomy_shop

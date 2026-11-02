@@ -1,0 +1,19 @@
+id: incorrect_port_assignment
+mechanism: A dependency address points at the wrong port
+category: Misconfiguration Failure
+fault_level: Container
+primitive: incorrect_port_assignment
+symptom_class: connection-refused-to-dependency
+requires:
+  min_env_keys: 1
+  min_ports: 1
+params:
+  difficulty: medium
+  observable: connection refused in caller logs
+mutation:
+  op: rewrite_env_port
+  value_from: unused_port
+root_cause_template: '`{env_key}` on container `{container}` in {workload} points at port `{bad_value}`
+  instead of the port its dependency listens on, so calls are refused.'
+public_instances:
+- incorrect_port_assignment
