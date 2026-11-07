@@ -22,6 +22,9 @@ SECRET_HINTS = ("PASSWORD", "SECRET", "TOKEN", "APIKEY", "API_KEY", "CREDENTIAL"
 EVIDENCE_WORKLOADS = (
     "otel", "opentelemetry", "collector", "prometheus", "grafana", "jaeger", "loki",
     "tempo", "alertmanager", "kube-state-metrics", "node-exporter", "beacon", "vector",
+    # Trace/log STORES, not just the shippers. astronomy-shop's opensearch is Jaeger's
+    # backend, and alertsnitch persists alerts: breaking either blinds the agent too.
+    "opensearch", "elasticsearch", "fluent", "fluentd", "fluent-bit", "zipkin", "alertsnitch",
 )
 # Mutating these strands the cluster rather than the app under test.
 INFRA_WORKLOADS = ("kube-", "coredns", "etcd", "operator", "cert-manager", "ingress-nginx")
