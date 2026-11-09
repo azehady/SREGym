@@ -128,15 +128,26 @@ def _from_cluster(app: str, namespace: str, context: str) -> list[WorkloadTarget
     return out
 
 
-def build_inventory(source: str = "manifests", context: str = "evals_gke") -> list[WorkloadTarget]:
-    """Collect bindable workloads. Falls back to manifests when the cluster has none."""
+def build_inventory(
+    source: str = "manifests",
+    context: str = "evals_gke",
+    namespaces: dict[str, str] | None = None,
+    manifest_fallback: bool = True,
+) -> list[WorkloadTarget]:
+    """Collect bindable workloads. `namespaces` remaps app -> live namespace.
+
+    A manifest inventory describes workloads that may not exist in any cluster, so every
+    variant built from it is unrunnable until the app is deployed. With source="cluster",
+    pass manifest_fallback=False to make an empty namespace an empty result instead of
+    silently substituting the manifests — otherwise "cluster" can quietly mean "manifests".
+    """
     targets: list[WorkloadTarget] = []
     for app, cfg in APP_SOURCES.items():
-        ns = cfg["namespace"]
+        ns = (namespaces or {}).get(app, cfg["namespace"])
         found: list[WorkloadTarget] = []
         if source == "cluster":
             found = _from_cluster(app, ns, context)
-        if not found:
+        if not found and (source != "cluster" or manifest_fallback):
             found = _from_chart(app, ns, cfg["chart"]) if "chart" in cfg else _from_dirs(app, ns, cfg.get("dirs", []))
         # One entry per workload name; manifest trees repeat the same workload across variants.
         seen: set[str] = set()

@@ -101,11 +101,20 @@ def build_patch():
         return [{"op": "replace", "path": base + path, "value": int(bad)}]
 
     if OP == "inflate_requests":
-        req = dict((c.get("resources") or {}).get("requests") or {})
+        res = dict(c.get("resources") or {})
+        req, lim = dict(res.get("requests") or {}), dict(res.get("limits") or {})
         for pair in str(bad).split(","):
             k, _, v = pair.partition("=")
-            req[k.strip()] = v.strip()
-        return [{"op": "add", "path": f"{base}/resources/requests", "value": req}]
+            k, v = k.strip(), v.strip()
+            req[k] = v
+            # A request above the container's OWN limit is rejected at admission, not
+            # scheduled and left Pending, so raise the limit with it.
+            if k in lim:
+                lim[k] = v
+        res["requests"] = req
+        if lim:
+            res["limits"] = lim
+        return [{"op": "add", "path": f"{base}/resources", "value": res}]
 
     sys.exit(f"FAIL unknown mutation op {OP!r}")
 

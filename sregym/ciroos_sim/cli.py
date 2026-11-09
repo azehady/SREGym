@@ -21,8 +21,24 @@ from sregym.ciroos_sim.templates import load_templates
 from sregym.ciroos_sim.validate import partition
 
 
+def _ns_map(pairs) -> dict:
+    """--ns astronomy-shop=orca-bench-astronomy-shop, repeatable."""
+    out = {}
+    for item in pairs or []:
+        app, _, ns = item.partition("=")
+        if not ns:
+            raise SystemExit(f"--ns expects app=namespace, got {item!r}")
+        out[app] = ns
+    return out
+
+
 def _load(args):
-    inventory = build_inventory(args.source, args.context)
+    inventory = build_inventory(
+        args.source,
+        args.context,
+        namespaces=_ns_map(getattr(args, "ns", None)),
+        manifest_fallback=not getattr(args, "no_manifest_fallback", False),
+    )
     templates = load_templates()
     return templates, inventory
 
@@ -128,6 +144,10 @@ def cmd_export(args) -> int:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="ciroos-sim")
     p.add_argument("--source", default="manifests", choices=["manifests", "cluster"])
+    p.add_argument("--ns", action="append", metavar="APP=NAMESPACE",
+                   help="remap an app to the namespace it is actually deployed in")
+    p.add_argument("--no-manifest-fallback", action="store_true",
+                   help="with --source cluster, do not silently substitute manifests")
     p.add_argument("--context", default="evals_gke")
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--include-public", action="store_true", help="also emit non-novel bindings")
