@@ -12,8 +12,10 @@ import argparse
 import collections
 import json
 import os
+import pathlib
 import sys
 
+from sregym.ciroos_sim import registry, runner
 from sregym.ciroos_sim.generator import generate, variants_as_dicts
 from sregym.ciroos_sim.inventory import build_inventory, inventory_as_dicts
 from sregym.ciroos_sim.scripts import CONTRACT, render
@@ -100,6 +102,48 @@ def cmd_scripts(args) -> int:
     return 0
 
 
+def cmd_live_validate(args) -> int:
+    """Inject each named variant for real, record what it actually did, then recover."""
+    templates, inventory = _load(args)
+    accepted, _ = partition(generate(templates, inventory, seed=args.seed))
+    ops = _ops(templates)
+    chosen = [v for v in accepted if v.id in set(args.id)]
+    missing = set(args.id) - {v.id for v in chosen}
+    if missing:
+        print(f"unknown variant(s): {sorted(missing)}")
+        return 1
+    root = pathlib.Path(args.out_dir or "./bundles")
+    rc = 0
+    for v in chosen:
+        bundle = root / v.id
+        bundle.mkdir(parents=True, exist_ok=True)
+        for name, body in render(v, context=args.context, op=ops.get(v.template_id, "")).items():
+            path = bundle / name
+            path.write_text(body)
+            if name.endswith(".sh"):
+                os.chmod(path, 0o755)
+        spec = {"id": v.id, "template_id": v.template_id, "namespace": v.namespace,
+                "workload": v.workload, "container": v.container, "params": v.params,
+                "symptom_class": v.symptom_class}
+        # A fault injected into an already-broken workload proves nothing.
+        if not runner.wait_ready(args.context, v.namespace, v.workload):
+            print(f"SKIP {v.id}: {v.workload} is not Ready before injection")
+            registry.stamp(spec, verdict="failed", note="workload not Ready at baseline")
+            rc = 1
+            continue
+        print(f"=== {v.id}  ({v.template_id} -> {v.symptom_class})")
+        out = runner.lifecycle(bundle, spec)
+        registry.stamp(spec, verdict=out["verdict"], mutation_applied=out["mutation_applied"],
+                       symptom_holds=out["symptom_holds"],
+                       discriminating=out["discriminating"],
+                       spec_restored=out.get("spec_restored"), clean=out.get("clean"),
+                       source="live-validate")
+        print(f"--> {out['verdict']}  restored={out.get('spec_restored')} clean={out.get('clean')}\n")
+    print(f"registry: {registry.DEFAULT}")
+    print(f"runnable now: {len(registry.runnable(variants_as_dicts(accepted)))}")
+    return rc
+
+
 def cmd_export(args) -> int:
     templates, inventory = _load(args)
     accepted, rejected = partition(
@@ -157,6 +201,10 @@ def main(argv=None) -> int:
     s = sub.add_parser("generate")
     s.add_argument("--app"); s.add_argument("--limit", type=int); s.add_argument("--show-rejects", action="store_true")
     s.set_defaults(fn=cmd_generate)
+    s = sub.add_parser("live-validate")
+    s.add_argument("--id", action="append", required=True, help="variant id; repeatable")
+    s.add_argument("--out-dir")
+    s.set_defaults(fn=cmd_live_validate)
     s = sub.add_parser("export"); s.add_argument("--out", required=True); s.set_defaults(fn=cmd_export)
     s = sub.add_parser("scripts")
     s.add_argument("--id"); s.add_argument("--index", type=int); s.add_argument("--out-dir")

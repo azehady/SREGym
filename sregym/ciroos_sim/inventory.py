@@ -49,6 +49,11 @@ class WorkloadTarget:
         return f"{self.kind.lower()}/{self.name}"
 
 
+def _probeable(probe: dict | None) -> bool:
+    """Only httpGet/tcpSocket probes have a port to repoint; an exec probe has none."""
+    return bool(probe) and bool(probe.get("httpGet") or probe.get("tcpSocket"))
+
+
 def _container_of(raw: dict) -> Container:
     probes = (raw.get("livenessProbe"), raw.get("readinessProbe"))
     return Container(
@@ -56,8 +61,8 @@ def _container_of(raw: dict) -> Container:
         image=raw.get("image", "") or "",
         env_keys=[e.get("name", "") for e in (raw.get("env") or []) if e.get("name")],
         ports=[p.get("containerPort") for p in (raw.get("ports") or []) if p.get("containerPort")],
-        has_liveness=bool(probes[0]),
-        has_readiness=bool(probes[1]),
+        has_liveness=_probeable(probes[0]),
+        has_readiness=_probeable(probes[1]),
         has_resources=bool(raw.get("resources")),
     )
 
