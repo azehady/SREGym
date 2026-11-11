@@ -180,8 +180,23 @@ def cmd_export(args) -> int:
         ],
         "rejected": [{"id": v.id, "reason": r} for v, r in rejected],
     }
+    # Carry each variant's live verdict, so the dashboard never shows a stale gate.
+    registry.annotate(doc["variants"])
+    runnable = sum(1 for v in doc["variants"] if registry.is_runnable(v.get("live") or {}))
+    # A cluster export silently falls back to manifests when workloads are parked at 0, which
+    # yields a different, unvalidated catalogue. Refuse to trade live verdicts for it.
+    out = pathlib.Path(args.out)
+    if out.exists() and not args.force:
+        prior = json.loads(out.read_text()).get("variants", [])
+        had = sum(1 for v in prior if registry.is_runnable(v.get("live") or {}))
+        if had > runnable:
+            raise SystemExit(
+                f"refusing to overwrite {args.out}: it has {had} live-validated variants, this "
+                f"export has {runnable}. Scale the app up before a cluster export, or pass --force."
+            )
     json.dump(doc, open(args.out, "w"), indent=2)
-    print(f"wrote {args.out}: {len(accepted)} variants, {len(rejected)} rejected")
+    print(f"wrote {args.out}: {len(accepted)} variants, {len(rejected)} rejected, "
+          f"{runnable} live-validated")
     return 0
 
 
@@ -205,7 +220,9 @@ def main(argv=None) -> int:
     s.add_argument("--id", action="append", required=True, help="variant id; repeatable")
     s.add_argument("--out-dir")
     s.set_defaults(fn=cmd_live_validate)
-    s = sub.add_parser("export"); s.add_argument("--out", required=True); s.set_defaults(fn=cmd_export)
+    s = sub.add_parser("export"); s.add_argument("--out", required=True)
+    s.add_argument("--force", action="store_true", help="overwrite even if it loses live verdicts")
+    s.set_defaults(fn=cmd_export)
     s = sub.add_parser("scripts")
     s.add_argument("--id"); s.add_argument("--index", type=int); s.add_argument("--out-dir")
     s.set_defaults(fn=cmd_scripts)

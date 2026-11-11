@@ -87,6 +87,11 @@ def is_runnable(entry: dict) -> bool:
     return entry.get("verdict") == VALID and entry.get("discriminating") is not False
 
 
+def stamp_for(spec: dict, path: pathlib.Path | None = None) -> dict:
+    """This spec's live stamp, or an empty one if its mutation has never been injected."""
+    return load(path)["variants"].get(fingerprint(spec)) or {}
+
+
 def runnable(variants: list[dict], path: pathlib.Path | None = None) -> list[str]:
     """Ids from THIS catalogue whose mutation has a valid stamp; nothing else is scoreable."""
     stamps = load(path)["variants"]
