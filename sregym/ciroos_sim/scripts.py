@@ -237,9 +237,124 @@ cd "$(dirname "$0")"
 """
 
 
+def _source(spec: dict, context: str, namespace: str) -> str:
+    """The shell that fetches what a check asserts on: a field, a log tail, or an exec."""
+    kube = f"kubectl --context={context} -n {namespace}"
+    if spec.get("logs"):
+        since = spec.get("since", "3m")
+        return (f"{kube} logs {spec['logs']} --all-containers --tail=400 --since={since} "
+                f"2>/dev/null | grep -Ei '{spec['matches']}' | head -3 || true")
+    if spec.get("exec"):
+        return f"{kube} exec {spec['exec']} -- {spec['command']} 2>/dev/null || true"
+    return f"{kube} get {spec['get']} -o jsonpath='{spec['jsonpath']}' 2>/dev/null || true"
+
+
+def _condition(spec: dict, negate: bool) -> str:
+    """The shell test that means this assertion passes."""
+    if spec.get("empty") is not None or spec.get("logs") or spec.get("matches"):
+        want_empty = bool(spec.get("empty", False)) != negate
+        return '[ -z "$got" ]' if want_empty else '[ -n "$got" ]'
+    if spec.get("contains"):
+        bang = "! " if negate else ""
+        return f"""{bang}printf "%s" "$got" | grep -qiE '{spec["contains"]}'"""
+    op = "!=" if negate else "="
+    return f"""[ "$got" {op} "{spec.get("equals", "")}" ]"""
+
+
+def _check(spec: dict, context: str, namespace: str, label: str, negate: bool = False) -> str:
+    """One declarative assertion as shell. An empty spec asserts nothing, and says so.
+
+    Retried, because the things these assert on settle at their own pace: a flood job needs
+    time to fill a cache, and a foreground delete is still Terminating when it returns.
+    """
+    if not spec:
+        return f'echo "skip {label}: template declares no check"'
+    what = spec.get("get") or spec.get("logs") or spec.get("exec")
+    tries, delay = int(spec.get("retries", 1)), int(spec.get("delay", 10))
+    lines = [
+        'ok=""',
+        f"for _ in $(seq 1 {tries}); do",
+        f"  got=$({_source(spec, context, namespace)})",
+        f"  if {_condition(spec, negate)}; then ok=1; break; fi",
+        f"  sleep {delay}",
+        "done",
+        f"""if [ -z "$ok" ]; then echo "FAIL {label}: {what} never satisfied the check (last: '$got')"; exit 1; fi""",
+        f'echo "ok {label}: {what}"',
+    ]
+    return "\n".join(lines)
+
+
+def _render_sregym(v: Variant, context: str) -> dict[str, str]:
+    """Bundle that drives a real SREGym primitive, rather than our own JSON patch.
+
+    The primitive owns both halves of the lifecycle, so recovery calls its recover_* rather
+    than restoring a snapshot; the snapshot is still taken as a backstop for inspection.
+    """
+    repo = "${CIROOS_SIM_REPO:-/workspace/home/ciroos/SREGym}"
+    py = f'"{repo}/.venv/bin/python"'
+    def invoke(action: str) -> str:
+        # Built per action rather than formatted: the repo default holds shell ${VAR:-...}.
+        return (f'{py} -m sregym.ciroos_sim.invoke {action} --primitive {v.primitive} '
+                f'--namespace {v.namespace} --workload {v.workload.split("/")[-1]} '
+                f'--context {context}')
+    applied = v.checks.get("applied", {})
+    symptom = v.checks.get("symptom", {})
+    # Recovery is proven by the template's own check when it names one, because the workload
+    # a primitive damages is not always the one the variant is bound to.
+    recovered = v.checks.get("recovered", {})
+
+    simulate = _preamble(v, "simulate", f"inject via the {v.primitive} primitive") + f"""
+# Snapshot first: the primitive owns recovery, but a stranded fault needs a reference.
+kubectl --context={context} -n {v.namespace} get {v.workload} -o json > original.json
+cd "{repo}" && {invoke("inject")}
+echo "injected {v.id}; now run ./validate.sh"
+"""
+
+    validate = _preamble(v, "validate", "prove the fault is live, not merely invoked") + f"""
+# The primitive reports success on its own terms; these assert the cluster actually changed.
+{_check(applied, context, v.namespace, "mutation_applied")}
+{_check(symptom, context, v.namespace, "symptom_holds")}
+# The runner parses this line; both checks above exit non-zero before reaching it.
+echo "mutation_applied=True symptom_holds=True pods=primitive:{v.primitive}"
+echo "VALID {v.id}  symptom_class={v.symptom_class}"
+"""
+
+    recover = _preamble(v, "recover", f"undo via the {v.primitive} primitive") + f"""
+cd "{repo}" && {invoke("recover")}
+kubectl --context={context} -n {v.namespace} rollout status {v.workload} --timeout=180s || true
+echo "recovered {v.id}; now run ./verify_recovered.sh"
+"""
+
+    verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + f"""
+# The applied-check must now FAIL to hold, and the workload must be serving again.
+{_check(applied, context, v.namespace, "mutation_gone", negate=True)}
+{_check(recovered, context, v.namespace, "dependency_healthy") if recovered else 'echo "skip dependency_healthy: no extra check"'}
+ready=$(kubectl --context={context} -n {v.namespace} get {v.workload} -o jsonpath='{{.status.readyReplicas}}' 2>/dev/null || true)
+if [ -z "$ready" ] || [ "$ready" -lt 1 ]; then echo "spec_restored=False pods=not-ready"; echo "FAIL {v.workload} has no Ready replica"; exit 1; fi
+echo "spec_restored=True pods=ready:$ready"
+echo "CLEAN {v.id}"
+"""
+    import json as _json
+    spec = {
+        "variant_id": v.id, "context": context, "namespace": v.namespace,
+        "kind": v.workload.split("/")[0], "name": v.workload.split("/")[1],
+        "container": v.container, "engine": "sregym", "primitive": v.primitive,
+        "checks": v.checks, "params": v.params,
+        "symptom_class": v.symptom_class, "root_cause": v.root_cause,
+        "template_id": v.template_id, "category": v.category, "fault_level": v.fault_level,
+    }
+    return {
+        "simulate.sh": simulate, "validate.sh": validate,
+        "recover.sh": recover, "verify_recovered.sh": verify,
+        "_lib.py": _LIB, "spec.json": _json.dumps(spec, indent=2) + "\n",
+    }
+
+
 def render(variant: Variant, context: str = "evals_gke", op: str = "") -> dict[str, str]:
     """Return {filename: contents} for the whole bundle, including spec.json and _lib.py."""
     v, ref = variant, variant.workload
+    if getattr(v, "engine", "spec") == "sregym":
+        return _render_sregym(v, context)
     simulate = _preamble(v, "simulate", f"inject the fault ({_OPS.get(op, op)})") + f"""
 # Snapshot FIRST. This file is the only reset plan recover.sh will trust.
 kubectl --context={context} -n {v.namespace} get {ref} -o json > original.json

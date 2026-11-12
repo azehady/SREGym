@@ -1,0 +1,28 @@
+id: wrong_dns_policy
+mechanism: Deployment pinned to an external resolver, so cluster-internal names stop resolving
+category: Network Failure
+fault_level: Cluster Management
+primitive: wrong_dns_policy
+engine: sregym
+symptom_class: dns-resolution-failure
+requires:
+  kind: deployment
+params:
+  difficulty: medium
+  observable: Pods Ready but dependency calls fail with name-resolution errors
+checks:
+  applied:
+    get: "{ref}"
+    jsonpath: "{.spec.template.spec.dnsPolicy}"
+    equals: "None"
+  symptom:
+    get: "{ref}"
+    jsonpath: "{.spec.template.spec.dnsConfig.nameservers[0]}"
+    equals: "8.8.8.8"
+root_cause_template: >-
+  Deployment {workload} is set to `dnsPolicy: None` with an external resolver, so it cannot
+  resolve `*.svc.cluster.local` dependencies even while its pods stay Ready.
+public_instances:
+  - wrong_dns_policy_astronomy_shop
+  - wrong_dns_policy_social_network
+  - wrong_dns_policy_hotel_reservation

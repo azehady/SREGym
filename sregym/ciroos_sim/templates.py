@@ -23,6 +23,8 @@ class FaultTemplate:
     primitive: str         # the generators/fault inject_<name> this maps to
     symptom_class: str
     root_cause_template: str
+    engine: str = "spec"   # "spec" = our JSON-patch ops; "sregym" = drive the primitive itself
+    checks: dict = field(default_factory=dict)  # kubectl assertions proving applied/symptom
     requires: dict = field(default_factory=dict)   # what a target must have to be bindable
     params: dict = field(default_factory=dict)     # how to derive the fault payload
     mutation: dict = field(default_factory=dict)   # declarative kubectl patch spec

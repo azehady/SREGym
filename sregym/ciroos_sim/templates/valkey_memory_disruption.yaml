@@ -1,0 +1,40 @@
+id: valkey_memory_disruption
+mechanism: Valkey flooded until it exceeds its container memory limit and is OOMKilled
+category: Database Failure
+fault_level: App
+primitive: valkey_memory_disruption
+engine: sregym
+symptom_class: cache-oom-eviction
+requires:
+  kind: deployment
+  workload_in: [cart]
+params:
+  difficulty: hard
+  observable: valkey-cart OOMKilled and restarting; cart loses its cache backend
+checks:
+  applied:
+    get: "job/valkey-memory-flood"
+    jsonpath: "{.metadata.name}"
+    equals: "valkey-memory-flood"
+    retries: 8
+    delay: 10
+  # Readiness NOW, not terminated-reason history: lastState is sticky, so it stayed true
+  # after recovery and would have passed with no fault injected at all.
+  symptom:
+    get: "pods -l io.kompose.service=valkey-cart"
+    jsonpath: "{.items[*].status.containerStatuses[*].ready}"
+    contains: "false"
+    retries: 18
+    delay: 10
+  # The damaged workload is valkey-cart, not the deployment this variant is bound to.
+  recovered:
+    get: "deployment/valkey-cart"
+    jsonpath: "{.status.readyReplicas}"
+    equals: "1"
+    retries: 12
+    delay: 10
+root_cause_template: >-
+  Valkey backing {workload} is being written far beyond its 20Mi container limit, so it is
+  OOMKilled repeatedly and the cache it serves is never warm.
+public_instances:
+  - valkey_memory_disruption

@@ -1,0 +1,30 @@
+id: valkey_auth_disruption
+mechanism: Valkey password changed underneath its client, so cached reads start failing auth
+category: Security Failure
+fault_level: App
+primitive: valkey_auth_disruption
+engine: sregym
+symptom_class: dependency-auth-failure
+requires:
+  kind: deployment
+  workload_in: [cart]
+params:
+  difficulty: hard
+  observable: Cart requests fail with NOAUTH/WRONGPASS while valkey itself stays Ready
+checks:
+  applied:
+    exec: "deployment/valkey-cart"
+    # Once requirepass is set, reading it back needs the new password too.
+    command: "env VALKEYCLI_AUTH=invalid_pass valkey-cli CONFIG GET requirepass"
+    contains: "invalid_pass"
+  # Client-visible effect, checked without traffic: an unauthenticated client is refused.
+  # The cart errors themselves only surface under load, so scoring this variant end to end
+  # needs the load generator running; the barrier itself is what proves the fault landed.
+  symptom:
+    exec: "deployment/valkey-cart"
+    command: "valkey-cli ping"
+    contains: "NOAUTH|WRONGPASS|Authentication"
+root_cause_template: Valkey now requires a password its client {workload} does not have, so
+  every cache operation fails authentication while both workloads report Ready.
+public_instances:
+  - valkey_auth_disruption

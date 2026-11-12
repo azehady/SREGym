@@ -1,0 +1,27 @@
+id: wrong_service_selector
+mechanism: Service selector repointed, so its endpoints empty while the pods stay healthy
+category: Misconfiguration Failure
+fault_level: Cluster Management
+primitive: wrong_service_selector
+engine: sregym
+symptom_class: service-has-no-endpoints
+requires:
+  kind: deployment
+params:
+  difficulty: medium
+  observable: Service resolves but has no endpoints; callers get connection refused
+checks:
+  applied:
+    get: "service/{name}"
+    jsonpath: "{.spec.selector.current_service_name}"
+    equals: "{name}"
+  symptom:
+    get: "endpoints/{name}"
+    jsonpath: "{.subsets[*].addresses[*].ip}"
+    empty: true
+root_cause_template: Service `{name}` selects pods that do not exist, so it has no endpoints
+  and every caller fails, although {workload} itself is healthy.
+public_instances:
+  - wrong_service_selector_astronomy_shop
+  - wrong_service_selector_social_network
+  - wrong_service_selector_hotel_reservation

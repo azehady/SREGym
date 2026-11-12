@@ -40,6 +40,8 @@ class Variant:
     difficulty_hint: str
     novel: bool
     provenance: dict = field(default_factory=dict)
+    engine: str = "spec"
+    checks: dict = field(default_factory=dict)   # declarative assertions for a primitive fault
 
 
 def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int) -> bool:
@@ -56,6 +58,12 @@ def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int)
         return False
     if len(c.ports) < req.get("min_ports", 0):
         return False
+    if req.get("kind") and target.ref.split("/")[0] != req["kind"]:
+        return False
+    # A primitive often works on one specific dependency (valkey, the cart it serves), so a
+    # template can name the workloads it is meaningful for.
+    if req.get("workload_in") and target.name not in req["workload_in"]:
+        return False
     return True
 
 
@@ -65,6 +73,9 @@ def _is_port_key(key: str) -> bool:
 
 def _payload(template: FaultTemplate, target: WorkloadTarget, c, rng: random.Random) -> dict:
     """Derive the concrete fault payload for this binding."""
+    # A primitive carries its own payload; binding an env key here would only add noise.
+    if template.engine == "sregym":
+        return {"env_key": "", "bad_value": ""}
     source = template.mutation.get("value_from", "")
     env_key = rng.choice(c.env_keys) if c.env_keys else ""
     if source == "shadow_pool":
@@ -81,6 +92,18 @@ def _payload(template: FaultTemplate, target: WorkloadTarget, c, rng: random.Ran
 def _variant_id(template_id: str, target: WorkloadTarget, container: str, payload: dict) -> str:
     seed = f"{template_id}|{target.app}|{target.name}|{container}|{payload.get('env_key')}|{payload.get('bad_value')}"
     return f"sim_{template_id}_{target.name}_{hashlib.sha1(seed.encode()).hexdigest()[:6]}"
+
+
+def _bind_checks(template: FaultTemplate, target: WorkloadTarget) -> dict:
+    """Resolve {name}/{ref} in a template's checks against the workload it is bound to."""
+    # Literal substitution, not str.format: a jsonpath like {.spec.replicas} is not a field.
+    def sub(val):
+        if not isinstance(val, str):
+            return val
+        return val.replace("{name}", target.name).replace("{ref}", target.ref)
+
+    return {phase: {k: sub(v) for k, v in spec.items()}
+            for phase, spec in (template.checks or {}).items()}
 
 
 def _is_novel(template: FaultTemplate, target: WorkloadTarget, public_pairs: set[tuple[str, str]]) -> bool:
@@ -116,7 +139,13 @@ def generate(
         for target in inventory:
             if apps and target.app not in apps:
                 continue
-            for i, c in enumerate(target.containers):
+            # A spec op edits one container; a primitive acts on the workload, so binding it
+            # per container would emit identical variants under different names.
+            indices = [0] if template.engine == "sregym" else range(len(target.containers))
+            for i in indices:
+                if i >= len(target.containers):
+                    continue
+                c = target.containers[i]
                 if not _fits(template, target, i):
                     continue
                 novel = _is_novel(template, target, public)
@@ -124,8 +153,8 @@ def generate(
                     continue
                 payload = _payload(template, target, c, rng)
                 root_cause = template.root_cause_template.format(
-                    container=c.name, workload=target.ref, env_key=payload.get("env_key", ""),
-                    bad_value=payload.get("bad_value", ""),
+                    container=c.name, workload=target.ref, name=target.name,
+                    env_key=payload.get("env_key", ""), bad_value=payload.get("bad_value", ""),
                 )
                 out.append(Variant(
                     id=_variant_id(template.id, target, c.name, payload),
@@ -137,6 +166,8 @@ def generate(
                     symptom_class=template.symptom_class,
                     difficulty_hint=template.difficulty_hint, novel=novel,
                     provenance={"seed": seed, "source": "ciroos_sim"},
+                    engine=template.engine,
+                    checks=_bind_checks(template, target),
                 ))
     out.sort(key=lambda v: v.id)
     return out[:limit] if limit else out
