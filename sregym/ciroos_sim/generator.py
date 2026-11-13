@@ -42,6 +42,7 @@ class Variant:
     provenance: dict = field(default_factory=dict)
     engine: str = "spec"
     checks: dict = field(default_factory=dict)   # declarative assertions for a primitive fault
+    invoke: dict = field(default_factory=dict)   # extra args for the primitive, per action
 
 
 def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int) -> bool:
@@ -94,16 +95,16 @@ def _variant_id(template_id: str, target: WorkloadTarget, container: str, payloa
     return f"sim_{template_id}_{target.name}_{hashlib.sha1(seed.encode()).hexdigest()[:6]}"
 
 
-def _bind_checks(template: FaultTemplate, target: WorkloadTarget) -> dict:
-    """Resolve {name}/{ref} in a template's checks against the workload it is bound to."""
+def _bind(block: dict, target: WorkloadTarget) -> dict:
+    """Resolve {name}/{ref} in a template's checks or invoke args against its workload."""
     # Literal substitution, not str.format: a jsonpath like {.spec.replicas} is not a field.
     def sub(val):
         if not isinstance(val, str):
             return val
         return val.replace("{name}", target.name).replace("{ref}", target.ref)
 
-    return {phase: {k: sub(v) for k, v in spec.items()}
-            for phase, spec in (template.checks or {}).items()}
+    return {phase: ({k: sub(v) for k, v in spec.items()} if isinstance(spec, dict) else sub(spec))
+            for phase, spec in (block or {}).items()}
 
 
 def _is_novel(template: FaultTemplate, target: WorkloadTarget, public_pairs: set[tuple[str, str]]) -> bool:
@@ -167,7 +168,8 @@ def generate(
                     difficulty_hint=template.difficulty_hint, novel=novel,
                     provenance={"seed": seed, "source": "ciroos_sim"},
                     engine=template.engine,
-                    checks=_bind_checks(template, target),
+                    checks=_bind(template.checks, target),
+                    invoke=_bind(template.invoke, target),
                 ))
     out.sort(key=lambda v: v.id)
     return out[:limit] if limit else out

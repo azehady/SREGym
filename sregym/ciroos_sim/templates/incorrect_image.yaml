@@ -1,0 +1,38 @@
+id: incorrect_image
+mechanism: Deployment rolled onto an image tag that does not exist in the registry
+category: System/Application Software Failure
+fault_level: Container
+primitive: incorrect_image
+engine: sregym
+symptom_class: image-pull-failure
+requires:
+  kind: deployment
+invoke:
+  inject:
+    bad_image: "ghcr.io/open-telemetry/demo:2.2.0-{name}-ciroos-sim-absent"
+  # The primitive overwrites the image and cannot invert that, so hand it the one it replaced.
+  recover:
+    correct_image: "@snapshot:spec.template.spec.containers.0.image"
+  # inject_incorrect_image rolls through replicas=0 and comes back at 1, losing any other count.
+  restore_replicas: true
+params:
+  difficulty: easy
+  observable: new pods stuck ImagePullBackOff while the old ReplicaSet is already scaled away
+checks:
+  applied:
+    get: "{ref}"
+    jsonpath: "{.spec.template.spec.containers[0].image}"
+    contains: "ciroos-sim-absent"
+    retries: 6
+    delay: 5
+  symptom:
+    get: "pods -l io.kompose.service={name}"
+    jsonpath: "{.items[*].status.containerStatuses[*].state.waiting.reason}"
+    contains: "ImagePullBackOff|ErrImagePull"
+    retries: 18
+    delay: 10
+root_cause_template: >-
+  Deployment {workload} was rolled onto an image tag that does not exist, so every new pod
+  stays in ImagePullBackOff and the service has no running endpoint.
+public_instances:
+  - incorrect_image

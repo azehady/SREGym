@@ -10,9 +10,16 @@ Every script is self-contained except for `_lib.py`, which does the JSON work ba
 
 from __future__ import annotations
 
+import shlex
+
 from sregym.ciroos_sim.generator import Variant
 
 CONTRACT = ("simulate.sh", "validate.sh", "recover.sh", "verify_recovered.sh")
+
+# Pull one value out of the pre-injection snapshot, for a recovery argument.
+_READ_SNAPSHOT = ('import json;o=json.load(open("original.json"))\n'
+                  'for k in "%s".split("."): o = o[int(k)] if k.isdigit() else o[k]\n'
+                  'print(o)')
 
 # How each mutation op becomes a JSON patch, and what proves it landed. Keyed by template.mutation.op.
 _OPS = {
@@ -292,11 +299,31 @@ def _render_sregym(v: Variant, context: str) -> dict[str, str]:
     """
     repo = "${CIROOS_SIM_REPO:-/workspace/home/ciroos/SREGym}"
     py = f'"{repo}/.venv/bin/python"'
-    def invoke(action: str) -> str:
+    def invoke(action: str, flags: str = "") -> str:
         # Built per action rather than formatted: the repo default holds shell ${VAR:-...}.
         return (f'{py} -m sregym.ciroos_sim.invoke {action} --primitive {v.primitive} '
                 f'--namespace {v.namespace} --workload {v.workload.split("/")[-1]} '
-                f'--context {context}')
+                f'--context {context} {flags}'.rstrip())
+
+    def params(action: str) -> tuple[str, str]:
+        """(preamble, --param flags) for one action's extra arguments.
+
+        A primitive that mutates a field cannot always invert it: recover_incorrect_image
+        wants the image it replaced. `@snapshot:` reads that value back out of the snapshot
+        simulate.sh took, so recovery replays captured state rather than guessing.
+        """
+        pre, flags = [], []
+        for key, val in (v.invoke.get(action) or {}).items():
+            if isinstance(val, str) and val.startswith("@snapshot:"):
+                var = key.upper()
+                pre.append(f"{var}=$(python3 -c {shlex.quote(_READ_SNAPSHOT % val[10:])})")
+                flags.append(f'--param {key}="${var}"')
+            else:
+                flags.append("--param " + shlex.quote(f"{key}={val}"))
+        return "\n".join(pre), " ".join(flags)
+
+    inject_pre, inject_flags = params("inject")
+    recover_pre, recover_flags = params("recover")
     applied = v.checks.get("applied", {})
     symptom = v.checks.get("symptom", {})
     # Recovery is proven by the template's own check when it names one, because the workload
@@ -306,7 +333,8 @@ def _render_sregym(v: Variant, context: str) -> dict[str, str]:
     simulate = _preamble(v, "simulate", f"inject via the {v.primitive} primitive") + f"""
 # Snapshot first: the primitive owns recovery, but a stranded fault needs a reference.
 kubectl --context={context} -n {v.namespace} get {v.workload} -o json > original.json
-cd "{repo}" && {invoke("inject")}
+{inject_pre}
+cd "{repo}" && {invoke("inject", inject_flags)}
 echo "injected {v.id}; now run ./validate.sh"
 """
 
@@ -319,8 +347,15 @@ echo "mutation_applied=True symptom_holds=True pods=primitive:{v.primitive}"
 echo "VALID {v.id}  symptom_class={v.symptom_class}"
 """
 
+    # Some primitives park the workload at zero to roll it; put the replica count back too.
+    replicas = (f'REPLICAS=$(python3 -c {shlex.quote(_READ_SNAPSHOT % "spec.replicas")})\n'
+                f'kubectl --context={context} -n {v.namespace} scale {v.workload} '
+                f'--replicas="$REPLICAS"') if v.invoke.get("restore_replicas") else ""
     recover = _preamble(v, "recover", f"undo via the {v.primitive} primitive") + f"""
-cd "{repo}" && {invoke("recover")}
+{recover_pre}
+cd "{repo}" && {invoke("recover", recover_flags)}
+cd - >/dev/null
+{replicas}
 kubectl --context={context} -n {v.namespace} rollout status {v.workload} --timeout=180s || true
 echo "recovered {v.id}; now run ./verify_recovered.sh"
 """
@@ -339,7 +374,7 @@ echo "CLEAN {v.id}"
         "variant_id": v.id, "context": context, "namespace": v.namespace,
         "kind": v.workload.split("/")[0], "name": v.workload.split("/")[1],
         "container": v.container, "engine": "sregym", "primitive": v.primitive,
-        "checks": v.checks, "params": v.params,
+        "checks": v.checks, "invoke": v.invoke, "params": v.params,
         "symptom_class": v.symptom_class, "root_cause": v.root_cause,
         "template_id": v.template_id, "category": v.category, "fault_level": v.fault_level,
     }

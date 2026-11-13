@@ -37,6 +37,7 @@ NAMESPACE_SAFE = {
     "wrong_service_selector",
     "valkey_auth_disruption",
     "valkey_memory_disruption",
+    "incorrect_image",
 }
 
 # Why each refused primitive is refused, so the message names the blast radius.
@@ -81,15 +82,27 @@ def find_owner(primitive: str):
     return None
 
 
-def call(injector, action: str, primitive: str, workload: str) -> None:
-    """Primitives disagree on how they name their target, so bind by parameter name."""
+def call(injector, action: str, primitive: str, workload: str, params: dict) -> None:
+    """Primitives disagree on how they name their target, so bind by parameter name.
+
+    The first parameter is the target whatever it is called; `namespace` is the injector's
+    own; anything else must come from the template, since a primitive like incorrect_image
+    cannot recover without being handed the image it replaced.
+    """
     method = getattr(injector, f"{action}_{primitive}")
-    params = [p for p in inspect.signature(method).parameters]
-    if not params:
-        return method()
-    if params[0] == "microservices":
-        return method([workload])
-    return method(workload)
+    bound = {}
+    for i, (name, p) in enumerate(inspect.signature(method).parameters.items()):
+        if name == "microservices":
+            bound[name] = [workload]
+        elif name == "namespace":
+            bound[name] = injector.namespace
+        elif i == 0:
+            bound[name] = workload
+        elif name in params:
+            bound[name] = params[name]
+        elif p.default is inspect.Parameter.empty:
+            sys.exit(f"FAIL {action}_{primitive} needs {name!r}; pass --param {name}=<value>")
+    return method(**bound)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--primitive")
     ap.add_argument("--namespace")
     ap.add_argument("--workload", default="")
+    ap.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra argument for the primitive; repeatable")
     ap.add_argument("--context", default=os.environ.get("CIROOS_SIM_CONTEXT", "evals_gke"))
     args = ap.parse_args(argv)
 
@@ -124,8 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit(f"FAIL no injector implements inject_{args.primitive}/recover_{args.primitive}")
 
     pin_context(args.context)
+    params = dict(kv.partition("=")[::2] for kv in args.param)
     injector = owner(args.namespace)
-    call(injector, args.action, args.primitive, args.workload)
+    call(injector, args.action, args.primitive, args.workload, params)
     print(f"{args.action}ed {args.primitive} on {args.workload or args.namespace} "
           f"({owner.__name__}, context={args.context})")
     return 0
