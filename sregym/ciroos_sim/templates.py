@@ -27,6 +27,9 @@ class FaultTemplate:
     checks: dict = field(default_factory=dict)  # kubectl assertions proving applied/symptom
     invoke: dict = field(default_factory=dict)  # extra args a primitive needs, per action
     fanout: int = 0        # >1 binds one variant to several workloads at once
+    compose: dict = field(default_factory=dict)  # fuse other templates' variants into one incident
+    trigger: dict = field(default_factory=dict)  # transient push that starts a self-sustaining loop
+    fidelity: str = ""     # how faithful the mechanism is, when it is not the real thing
     requires: dict = field(default_factory=dict)   # what a target must have to be bindable
     params: dict = field(default_factory=dict)     # how to derive the fault payload
     mutation: dict = field(default_factory=dict)   # declarative kubectl patch spec

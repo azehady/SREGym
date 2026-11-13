@@ -1,0 +1,31 @@
+id: dram_module_failure
+mechanism: Defective DRAM module surfacing ECC errors, so anonymous mappings fail and the runtime cannot grow its heap
+category: Hardware Component Failure
+fault_level: Hardware
+primitive: mmap_fail
+engine: sregym
+fidelity: node-level
+symptom_class: startup-or-dependency-failure
+requires:
+  kind: deployment
+params:
+  difficulty: hard
+  observable: Pods on one node fail in ways nothing in their own spec explains
+checks:
+  # Proof lives with the injector, not the victim: the probe is a BPF pin in the node kernel.
+  applied:
+    namespace: khaos
+    exec: daemonset/khaos
+    command: sh -lc 'ls /sys/fs/bpf 2>/dev/null | grep mmap_fail | head -1'
+    contains: "mmap_fail"
+    retries: 6
+    delay: 5
+  symptom:
+    logs: deployment/{name}
+    matches: " runtime"
+    retries: 12
+    delay: 10
+root_cause_template: >-
+  Defective DRAM module surfacing ECC errors, so anonymous mappings fail and the runtime cannot grow its heap. {workload} is a victim of the node it happens to be scheduled on; its own spec is
+  correct, and rescheduling it elsewhere is what makes the symptom move.
+public_instances: []

@@ -87,11 +87,13 @@ def cmd_scripts(args) -> int:
     if chosen is None:
         print(f"no such variant; {len(accepted)} available, e.g. {accepted[0].id if accepted else '-'}")
         return 1
-    bundle = render(chosen, context=args.context, op=_ops(templates).get(chosen.template_id, ""))
+    ops = _ops(templates)
+    bundle = render(chosen, context=args.context, op=ops.get(chosen.template_id, ""), ops=ops)
     out = args.out_dir or f"./bundles/{chosen.id}"
     os.makedirs(out, exist_ok=True)
     for name, body in bundle.items():
         path = os.path.join(out, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as fh:
             fh.write(body)
         if name.endswith(".sh"):
@@ -117,17 +119,22 @@ def cmd_live_validate(args) -> int:
     for v in chosen:
         bundle = root / v.id
         bundle.mkdir(parents=True, exist_ok=True)
-        for name, body in render(v, context=args.context, op=ops.get(v.template_id, "")).items():
+        for name, body in render(v, context=args.context, op=ops.get(v.template_id, ""),
+                                 ops=ops).items():
             path = bundle / name
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body)
             if name.endswith(".sh"):
                 os.chmod(path, 0o755)
         spec = {"id": v.id, "template_id": v.template_id, "namespace": v.namespace,
                 "workload": v.workload, "container": v.container, "params": v.params,
-                "targets": v.targets, "symptom_class": v.symptom_class}
+                # Both of these are part of the fingerprint, so a stamp written without them
+                # lands under a different key than the catalogue later looks up.
+                "targets": v.targets, "members": v.members, "trigger": v.trigger,
+                "symptom_class": v.symptom_class}
         # A fault injected into an already-broken workload proves nothing — and for a
         # correlated set, every member has to be healthy, not just the one it is named for.
-        refs = [t["ref"] for t in v.targets] or [v.workload]
+        refs = [t["ref"] for t in v.targets] or [m["workload"] for m in v.members] or [v.workload]
         unhealthy = [r for r in refs if not runner.wait_ready(args.context, v.namespace, r)]
         if unhealthy:
             print(f"SKIP {v.id}: {', '.join(unhealthy)} not Ready before injection")
@@ -162,6 +169,8 @@ def cmd_export(args) -> int:
         generate(templates, inventory, seed=args.seed, novel_only=not args.include_public)
     )
     ops = _ops(templates)
+    bundles = [render(v, context=args.context, op=ops.get(v.template_id, ""), ops=ops)
+               for v in accepted]
     doc = {
         "source": "ciroos_sim",
         "seed": args.seed,
@@ -176,6 +185,7 @@ def cmd_export(args) -> int:
                 "id": t.id, "mechanism": t.mechanism, "category": t.category,
                 "fault_level": t.fault_level, "primitive": t.primitive,
                 "symptom_class": t.symptom_class, "difficulty": t.difficulty_hint,
+                "fidelity": t.fidelity,
             }
             for t in templates
         ],
@@ -183,17 +193,21 @@ def cmd_export(args) -> int:
         # Scripts are rendered here, server-side, so the dashboard never re-implements the
         # mutation logic in TypeScript and drift becomes impossible.
         "contract": list(CONTRACT),
-        "lib": render(accepted[0], context=args.context, op=ops.get(accepted[0].template_id, ""))["_lib.py"] if accepted else "",
+        # A composite carries no _lib.py of its own; its members each have theirs.
+        "lib": next((b["_lib.py"] for b in bundles if "_lib.py" in b), ""),
         "variants": [
-            dict(d, scripts={k: val for k, val in render(v, context=args.context,
-                                                         op=ops.get(v.template_id, "")).items()
-                             if k != "_lib.py"})
-            for d, v in zip(variants_as_dicts(accepted), accepted)
+            dict(d, scripts={k: val for k, val in b.items() if k != "_lib.py"})
+            for d, b in zip(variants_as_dicts(accepted), bundles)
         ],
         "rejected": [{"id": v.id, "reason": r} for v, r in rejected],
     }
     # Carry each variant's live verdict, so the dashboard never shows a stale gate.
     registry.annotate(doc["variants"])
+    # A node-level fault is unproven for a reason, not merely untried; say which.
+    for v in doc["variants"]:
+        if v.get("fidelity") == "node-level":
+            v["blocked"] = ("attaches a BPF kprobe in the node kernel; needs a cluster that can "
+                            "be destroyed, and a running khaos DaemonSet")
     runnable = sum(1 for v in doc["variants"] if registry.is_runnable(v.get("live") or {}))
     # A cluster export silently falls back to manifests when workloads are parked at 0, which
     # yields a different, unvalidated catalogue. Refuse to trade live verdicts for it.

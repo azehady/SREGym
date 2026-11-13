@@ -34,6 +34,11 @@ def fingerprint(spec: dict) -> str:
     including it made every stamp expire whenever a generator change shifted the RNG stream.
     The generated id is a label, not an identity.
     """
+    # A composite's identity is the set of faults it fuses; its own fields describe only the
+    # first member, which two different composites can share.
+    members = spec.get("members") or []
+    if members:
+        return "compose|" + ",".join(sorted(fingerprint(m) for m in members))
     params = spec.get("params") or {}
     base = [spec.get("template_id", ""), spec.get("namespace", ""), spec.get("workload", ""),
             spec.get("container", ""), params.get("env_key", "") or ""]

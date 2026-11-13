@@ -71,6 +71,16 @@ def _is_infra(workload: str) -> bool:
 
 def check(variant: Variant) -> Verdict:
     """Static gate. Live symptom confirmation is a separate, cluster-side step."""
+    # A composite is only as sound as its weakest member, and two faults on one workload are
+    # not independent however they were generated.
+    if variant.members:
+        for m in variant.members:
+            verdict = check(Variant(**m))
+            if not verdict:
+                return Verdict(False, f"member {m['id']}: {verdict.reason}")
+        if len({m["workload"] for m in variant.members}) < len(variant.members):
+            return Verdict(False, "members share a workload, so the faults are not independent")
+
     key = (variant.params or {}).get("env_key", "") or ""
 
     # Every workload, not just the primary: one bad member poisons a whole correlated set.

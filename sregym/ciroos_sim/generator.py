@@ -8,6 +8,7 @@ SREGym — otherwise a model that memorised the benchmark still has the answer.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import random
 import re
 from dataclasses import asdict, dataclass, field
@@ -20,6 +21,8 @@ from sregym.ciroos_sim.templates import FaultTemplate
 SHADOW_POOL = ["localhost", "127.0.0.1", "0.0.0.0", "invalid.local", "unused.svc.cluster.local"]
 UNUSED_PORTS = [9, 81, 1234, 8099, 9099, 18080, 28080, 39090]
 OVERSIZED = ["cpu=64,memory=256Gi", "cpu=128,memory=512Gi", "memory=1Ti"]
+# How much room over the measured base-load working set a squeezed limit keeps.
+HEADROOMS = ["1.10", "1.15", "1.25"]
 
 
 @dataclass
@@ -44,6 +47,9 @@ class Variant:
     checks: dict = field(default_factory=dict)   # declarative assertions for a primitive fault
     invoke: dict = field(default_factory=dict)   # extra args for the primitive, per action
     targets: list[dict] = field(default_factory=list)  # every workload this variant damages
+    members: list[dict] = field(default_factory=list)  # sub-variants, when this is a composite
+    trigger: dict = field(default_factory=dict)        # the transient push, for a metastable fault
+    fidelity: str = ""                                 # "node-level" needs a cluster to itself
 
 
 def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int) -> bool:
@@ -86,6 +92,10 @@ def _payload(template: FaultTemplate, target: WorkloadTarget, c, rng: random.Ran
         return {"env_key": env_key, "bad_value": str(rng.choice(pool))}
     if source == "unused_port":
         return {"env_key": env_key, "bad_value": str(rng.choice(UNUSED_PORTS))}
+    if source == "live_working_set":
+        # No value to draw: the limit is measured on the cluster at inject time. Only how
+        # tight the band is varies, which is what makes one binding harder than the next.
+        return {"env_key": "", "bad_value": "", "headroom": rng.choice(HEADROOMS)}
     if source == "oversized_resources":
         return {"env_key": "", "bad_value": rng.choice(OVERSIZED)}
     return {"env_key": env_key, "bad_value": ""}
@@ -171,6 +181,111 @@ def public_pairs_from(templates: list[FaultTemplate], inventory: list[WorkloadTa
     return pairs
 
 
+def _bindings(template: FaultTemplate, inventory: list[WorkloadTarget], apps, public,
+              novel_only: bool, rng: random.Random, seed: int) -> list[Variant]:
+    """Every (target x container) binding of one template."""
+    out: list[Variant] = []
+    for target in inventory:
+        if apps and target.app not in apps:
+            continue
+        # A spec op edits one container; a primitive acts on the workload, so binding it
+        # per container would emit identical variants under different names.
+        indices = [0] if template.engine == "sregym" else range(len(target.containers))
+        for i in indices:
+            if i >= len(target.containers):
+                continue
+            c = target.containers[i]
+            if not _fits(template, target, i):
+                continue
+            novel = _is_novel(template, target, public)
+            if novel_only and not novel:
+                continue
+            payload = _payload(template, target, c, rng)
+            root_cause = template.root_cause_template.format(
+                container=c.name, workload=target.ref, name=target.name,
+                env_key=payload.get("env_key", ""), bad_value=payload.get("bad_value", ""),
+            )
+            out.append(Variant(
+                id=_variant_id(template.id, target, c.name, payload),
+                template_id=template.id, mechanism=template.mechanism,
+                category=template.category, fault_level=template.fault_level,
+                primitive=template.primitive, app=target.app, namespace=target.namespace,
+                workload=target.ref, container=c.name, params=payload,
+                root_cause=f"[fault_spec] component={target.ref}; namespace={target.namespace} || {root_cause}",
+                symptom_class=template.symptom_class,
+                difficulty_hint=template.difficulty_hint, novel=novel,
+                provenance={"seed": seed, "source": "ciroos_sim"},
+                engine=template.engine,
+                checks=_bind(template.checks, target),
+                # Left unbound: the renderer resolves {name} per target, which is the
+                # only correct answer once a variant has more than one.
+                invoke=template.invoke,
+                targets=[_target(template, target)],
+                trigger=template.trigger, fidelity=template.fidelity,
+            ))
+    return out
+
+
+def _compose(template: FaultTemplate, pool: list[Variant], limit: int) -> list[Variant]:
+    """Several unrelated faults in one incident, which is what makes them hard to tell apart.
+
+    Members are drawn from variants that already bind on their own, so each keeps its own
+    engine, namespace and checks — the renderer then runs each as its own sub-bundle.
+    """
+    # Imported here, not at module scope: the gate imports this module to read Variant.
+    from sregym.ciroos_sim.validate import check
+
+    wanted = template.compose.get("members") or []
+    # Screen members BEFORE truncating. Taking the first twelve by id and rejecting the bad
+    # ones afterwards threw away 22 of 24 composites on a four-app inventory, because the
+    # alphabetically early workloads are the ones the gate most often refuses.
+    lanes = [sorted((v for v in pool if v.template_id == tid and check(v)), key=lambda v: v.id)[:12]
+             for tid in wanted]
+    if not all(lanes):
+        return []
+    candidates: list[tuple[tuple, tuple[Variant, ...]]] = []
+    for idx in itertools.product(*(range(len(lane)) for lane in lanes)):
+        picks = tuple(lane[i] for lane, i in zip(lanes, idx))
+        # Independence is the whole claim: two faults on one workload, or two instances of
+        # one mechanism, are a single cause wearing two hats.
+        if len({p.workload for p in picks}) < len(picks):
+            continue
+        if len({p.category for p in picks}) < len(picks):
+            continue
+        key = "|".join(sorted(f"{p.template_id}@{p.namespace}/{p.workload}" for p in picks))
+        cross = len({p.namespace for p in picks}) == len(picks)
+        # Cross-namespace first (one namespace invites a shared-cause explanation), then in
+        # diagonal order, so a truncated list still draws evenly from every lane instead of
+        # pairing the whole of one lane against the alphabetically first member of the next.
+        candidates.append(((0 if cross else 1, max(idx), sum(idx), key), picks))
+    out: list[Variant] = []
+    for rank, picks in sorted(candidates, key=lambda c: c[0])[:limit]:
+        key = rank[-1]
+        head = picks[0]
+        refs = "+".join(f"{p.namespace}/{p.workload}" for p in picks)
+        story = "\n\n".join(
+            f"Fault {i} ({p.template_id}): {p.root_cause.split('|| ', 1)[-1]}"
+            for i, p in enumerate(picks, start=1))
+        out.append(Variant(
+            id=f"sim_{template.id}_{head.workload.split('/')[-1]}_"
+               f"{hashlib.sha1(key.encode()).hexdigest()[:6]}",
+            template_id=template.id, mechanism=template.mechanism, category=template.category,
+            fault_level=template.fault_level, primitive=template.primitive, app=head.app,
+            namespace=head.namespace, workload=head.workload, container=head.container,
+            params={"env_key": "", "bad_value": "", "members": refs},
+            root_cause=f"[fault_spec] component={refs}; namespace="
+                       f"{','.join(sorted({p.namespace for p in picks}))} || "
+                       f"{len(picks)} independent faults are active at once, with no common "
+                       f"cause between them.\n\n{story}",
+            symptom_class=template.symptom_class, difficulty_hint=template.difficulty_hint,
+            novel=all(p.novel for p in picks),
+            provenance={"source": "ciroos_sim", "compose": list(wanted),
+                        "cross_namespace": len({p.namespace for p in picks}) == len(picks)},
+            engine="composite", members=[asdict(p) for p in picks],
+        ))
+    return out
+
+
 def generate(
     templates: list[FaultTemplate],
     inventory: list[WorkloadTarget],
@@ -183,47 +298,18 @@ def generate(
     rng = random.Random(seed)
     public = public_pairs_from(templates, inventory)
     out: list[Variant] = []
+    composers: list[FaultTemplate] = []
     for template in templates:
-        if template.fanout:
+        if template.compose:
+            composers.append(template)
+        elif template.fanout:
             out.extend(_fanout(template, inventory, apps, public, novel_only))
-            continue
-        for target in inventory:
-            if apps and target.app not in apps:
-                continue
-            # A spec op edits one container; a primitive acts on the workload, so binding it
-            # per container would emit identical variants under different names.
-            indices = [0] if template.engine == "sregym" else range(len(target.containers))
-            for i in indices:
-                if i >= len(target.containers):
-                    continue
-                c = target.containers[i]
-                if not _fits(template, target, i):
-                    continue
-                novel = _is_novel(template, target, public)
-                if novel_only and not novel:
-                    continue
-                payload = _payload(template, target, c, rng)
-                root_cause = template.root_cause_template.format(
-                    container=c.name, workload=target.ref, name=target.name,
-                    env_key=payload.get("env_key", ""), bad_value=payload.get("bad_value", ""),
-                )
-                out.append(Variant(
-                    id=_variant_id(template.id, target, c.name, payload),
-                    template_id=template.id, mechanism=template.mechanism,
-                    category=template.category, fault_level=template.fault_level,
-                    primitive=template.primitive, app=target.app, namespace=target.namespace,
-                    workload=target.ref, container=c.name, params=payload,
-                    root_cause=f"[fault_spec] component={target.ref}; namespace={target.namespace} || {root_cause}",
-                    symptom_class=template.symptom_class,
-                    difficulty_hint=template.difficulty_hint, novel=novel,
-                    provenance={"seed": seed, "source": "ciroos_sim"},
-                    engine=template.engine,
-                    checks=_bind(template.checks, target),
-                    # Left unbound: the renderer resolves {name} per target, which is the
-                    # only correct answer once a variant has more than one.
-                    invoke=template.invoke,
-                    targets=[_target(template, target)],
-                ))
+        else:
+            out.extend(_bindings(template, inventory, apps, public, novel_only, rng, seed))
+    # Composition runs last: it pairs variants, so it needs the pool already complete.
+    pool = sorted(out, key=lambda v: v.id)
+    for template in composers:
+        out.extend(_compose(template, pool, int(template.compose.get("limit", 24))))
     out.sort(key=lambda v: v.id)
     return out[:limit] if limit else out
 

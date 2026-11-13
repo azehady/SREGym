@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import importlib
 import inspect
 import os
@@ -50,7 +51,18 @@ CLUSTER_SCOPED = {
     "disk_pressure": "acts on the node, which is shared",
 }
 
+# Syscall faults khaos delivers by attaching a BPF kprobe to a workload's host PID. The probe
+# runs in the NODE's kernel, not the container's, so a bad one takes down every tenant on that
+# node. Gated behind an explicit opt-in rather than listed as namespace-safe.
+HOST_LEVEL = {
+    "read_error": "read() returns EIO, as a failing storage controller would",
+    "write_error": "write() fails, as a disk rejecting writes would",
+    "mmap_fail": "anonymous mappings fail, as a defective DRAM module surfacing ECC errors would",
+    "getaddrinfo_fail": "the node-local resolver path fails for every lookup",
+}
+
 NS_PREFIX = os.environ.get("CIROOS_SIM_NS_PREFIX", "orca-bench-")
+KHAOS_NS = os.environ.get("CIROOS_SIM_KHAOS_NS", "khaos")
 
 
 def pin_context(context: str) -> None:
@@ -105,6 +117,59 @@ def call(injector, action: str, primitive: str, workload: str, params: dict) -> 
     return method(**bound)
 
 
+def _kubectl(*args: str) -> str:
+    out = subprocess.run(["kubectl", *args], capture_output=True, text=True)
+    return out.stdout or ""
+
+
+def require_disposable(context: str, primitive: str) -> None:
+    """Host-level faults need a cluster nobody else is using; nothing scopes them to a tenant."""
+    allowed = [c.strip() for c in os.environ.get("CIROOS_SIM_DISPOSABLE_CLUSTER", "").split(",") if c.strip()]
+    if context not in allowed:
+        sys.exit(f"FAIL {primitive} attaches a BPF kprobe in the node's kernel ({HOST_LEVEL[primitive]}). "
+                 f"A panic takes every pod on that node with it, and nothing confines it to "
+                 f"{NS_PREFIX}*. Export CIROOS_SIM_DISPOSABLE_CLUSTER={context} only for a cluster "
+                 f"you can afford to destroy.")
+
+
+def require_khaos() -> list[str]:
+    """Without the DaemonSet these primitives inject nothing and still report success."""
+    pods = _kubectl("-n", KHAOS_NS, "get", "pods", "-l", "app=khaos",
+                    "--field-selector=status.phase=Running",
+                    "-o", "jsonpath={.items[*].metadata.name}").split()
+    if not pods:
+        sys.exit(f"FAIL no running khaos DaemonSet pod in namespace {KHAOS_NS!r}; a host-level "
+                 f"fault would be a silent no-op. Deploy khaos first.")
+    return pods
+
+
+def host_pods(namespace: str, workload: str) -> list[str]:
+    """A kprobe binds to a PID, so the target is the workload's pods, not the Deployment."""
+    labels = _kubectl("-n", namespace, "get", "deployment", workload,
+                      "-o", "jsonpath={.spec.selector.matchLabels}")
+    sel = ",".join(f"{k}={v}" for k, v in json.loads(labels or "{}").items())
+    if not sel:
+        sys.exit(f"FAIL deployment/{workload} in {namespace} has no selector to resolve pods from")
+    names = _kubectl("-n", namespace, "get", "pods", "-l", sel,
+                     "--field-selector=status.phase=Running",
+                     "-o", "jsonpath={.items[*].metadata.name}").split()
+    if not names:
+        sys.exit(f"FAIL no Running pods for deployment/{workload} in {namespace}")
+    return [f"{namespace}/{n}" for n in names]
+
+
+def call_host_level(action: str, primitive: str, namespace: str, workload: str, context: str) -> None:
+    """Drive khaos directly: its injector is one inject/recover pair, not a method per fault."""
+    from sregym.generators.fault.inject_hw import HWFaultInjector
+
+    require_disposable(context, primitive)
+    pin_context(context)
+    require_khaos()
+    pods = host_pods(namespace, workload)
+    injector = HWFaultInjector(khaos_namespace=KHAOS_NS)
+    (injector.inject if action == "inject" else injector.recover)(pods, primitive)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ciroos-sim-invoke")
     ap.add_argument("action", choices=["inject", "recover", "list"])
@@ -117,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.action == "list":
+        for name, why in sorted(HOST_LEVEL.items()):
+            print(f"{name:32s} host     {why}")
         for name in sorted(NAMESPACE_SAFE):
             owner = find_owner(name)
             print(f"{name:32s} {'ok' if owner else 'MISSING'}  {owner.__name__ if owner else ''}")
@@ -128,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit("FAIL --primitive and --namespace are required")
     if not args.namespace.startswith(NS_PREFIX):
         sys.exit(f"FAIL namespace {args.namespace!r} is outside {NS_PREFIX!r}; refusing to inject")
+    if args.primitive in HOST_LEVEL:
+        call_host_level(args.action, args.primitive, args.namespace, args.workload, args.context)
+        print(f"{args.action}ed {args.primitive} on {args.workload} (khaos, context={args.context})")
+        return 0
     if args.primitive in CLUSTER_SCOPED:
         sys.exit(f"FAIL {args.primitive} {CLUSTER_SCOPED[args.primitive]}; not runnable on a shared cluster")
     if args.primitive not in NAMESPACE_SAFE:

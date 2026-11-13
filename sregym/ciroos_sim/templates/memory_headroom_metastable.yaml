@@ -1,0 +1,34 @@
+id: memory_headroom_metastable
+mechanism: Memory headroom trimmed to the base-load working set, so one traffic spike starts
+  an OOM-restart loop that keeps running after the spike is over
+category: Metastable Failure
+fault_level: App
+primitive: resource_limit
+symptom_class: metastable-restart-loop
+requires:
+  has_resources: true
+mutation:
+  op: squeeze_memory_limit
+  value_from: live_working_set
+trigger:
+  # Withdraw to the SAME base load the baseline was taken at, never to zero: a loop that
+  # stops when the traffic stops is not metastable, it is just load.
+  warm: {scale: "deployment/load-generator", replicas: 1}
+  settle: 60
+  apply: {scale: "deployment/load-generator", replicas: 8}
+  hold: 180
+  withdraw: {scale: "deployment/load-generator", replicas: 1}
+  window: 90
+  stop: {scale: "deployment/load-generator", replicas: 0}
+params:
+  difficulty: hard
+  observable: Pods restart repeatedly at a traffic level they served fine before the spike
+root_cause_template: >-
+  Container `{container}` in {workload} has its memory limit trimmed to barely above its
+  base-load working set. Base traffic alone is survivable, but one spike pushes it past the
+  limit, and the restart costs more memory than the steady state, so the OOM-restart loop
+  keeps running at the base traffic it used to handle.
+public_instances:
+  - gc_capacity_degradation
+  - load_spike_rpc_retry_storm
+  - capacity_decrease_rpc_retry_storm

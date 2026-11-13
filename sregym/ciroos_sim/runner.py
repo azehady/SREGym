@@ -23,10 +23,22 @@ APPLIED = re.compile(r"mutation_applied=(\w+)\s+symptom_holds=(\w+)")
 RESTORED = re.compile(r"spec_restored=(\w+)")
 
 
-def _run(bundle: pathlib.Path, script: str, log) -> tuple[int, str]:
+def step_timeout(spec: dict) -> int:
+    """A metastable variant spends most of its run deliberately waiting — warm-up, spike,
+    then a window with the trigger gone — so the flat timeout would kill it mid-protocol."""
+    t = spec.get("trigger") or {}
+    if not t:
+        return STEP_TIMEOUT
+    # The deliberate waits are not the whole cost: simulate.sh also waits on two rollouts at
+    # up to 180s each, which is what made the first run die mid-protocol at 810s.
+    waits = 2 * int(t.get("settle", 0)) + int(t.get("hold", 0)) + int(t.get("window", 0))
+    return STEP_TIMEOUT + waits + 2 * 180
+
+
+def _run(bundle: pathlib.Path, script: str, log, timeout: int = STEP_TIMEOUT) -> tuple[int, str]:
     log(f"$ ./{script}")
     proc = subprocess.run(["bash", f"./{script}"], cwd=bundle, text=True,
-                          capture_output=True, timeout=STEP_TIMEOUT)
+                          capture_output=True, timeout=timeout)
     out = (proc.stdout or "") + (proc.stderr or "")
     for line in out.splitlines():
         log(f"  {line}")
@@ -42,15 +54,16 @@ def lifecycle(bundle: pathlib.Path, spec: dict, *, investigate=None, log=print,
     run in the namespace.
     """
     result = {"variant_id": spec["id"], "symptom_class": spec.get("symptom_class")}
+    budget = step_timeout(spec)
     try:
         phase("initializing")
-        code, _ = _run(bundle, "simulate.sh", log)
+        code, _ = _run(bundle, "simulate.sh", log, budget)
         # simulate.sh exits non-zero when the rollout cannot complete, which is expected for
         # pods-pending-unschedulable; validate.sh is the authority on whether it worked.
         result["simulate_exit"] = code
 
         phase("activating")
-        code, out = _run(bundle, "validate.sh", log)
+        code, out = _run(bundle, "validate.sh", log, budget)
         found = APPLIED.search(out)
         result["mutation_applied"] = bool(found and found.group(1) == "True")
         result["symptom_holds"] = bool(found and found.group(2) == "True")
@@ -66,8 +79,8 @@ def lifecycle(bundle: pathlib.Path, spec: dict, *, investigate=None, log=print,
     finally:
         if recover:
             phase("cleaning")
-            _run(bundle, "recover.sh", log)
-            code, out = _run(bundle, "verify_recovered.sh", log)
+            _run(bundle, "recover.sh", log, budget)
+            code, out = _run(bundle, "verify_recovered.sh", log, budget)
             found = RESTORED.search(out)
             result["spec_restored"] = bool(found and found.group(1) == "True")
             result["clean"] = code == 0
@@ -80,6 +93,7 @@ def render_bundle(spec: dict, out_dir: pathlib.Path) -> pathlib.Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, body in (spec.get("scripts") or {}).items():
         path = out_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
         if name.endswith(".sh"):
             os.chmod(path, 0o755)

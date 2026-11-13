@@ -1,0 +1,20 @@
+id: multiple_independent_failures
+mechanism: Two unrelated faults active at once, with no causal link between them
+category: Multiple Independent Failures
+fault_level: Cluster Management
+primitive: composite
+engine: composite
+symptom_class: multiple-independent-faults
+compose:
+  # Different mechanisms AND different categories, so neither explains the other. Both halves
+  # are already live-validated on their own, which is what makes the composite worth running.
+  members:
+    - wrong_service_selector
+    - resource_request_starvation
+  limit: 24
+params:
+  difficulty: hard
+  observable: Two disjoint symptom sets; explaining one still leaves the other unaccounted for
+root_cause_template: Two independent faults are active at once in {workload}.
+public_instances:
+  - social_net_hotel_res_astro_shop_concurrent_failures

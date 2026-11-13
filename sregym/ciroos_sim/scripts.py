@@ -37,10 +37,12 @@ _LIB = '''\
 import json
 import subprocess
 import sys
+import time
 
 SPEC = json.load(open("spec.json"))
 CTX, NS, KIND, NAME = SPEC["context"], SPEC["namespace"], SPEC["kind"], SPEC["name"]
 CONTAINER, OP, PARAMS = SPEC["container"], SPEC["op"], SPEC["params"]
+TRIGGER = SPEC.get("trigger") or {}
 REF = f"{KIND}/{NAME}"
 
 
@@ -78,6 +80,72 @@ def probe_port_path(container, probe):
     return None
 
 
+def working_set_mi():
+    """What the target container is actually using right now, in MiB, across its pods."""
+    sel = live()["spec"]["selector"]["matchLabels"]
+    q = ",".join(f"{k}={v}" for k, v in sel.items())
+    out = kubectl("top", "pods", "-l", q, "--containers", "--no-headers", check=False)
+    peak = 0
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 4 and cols[1] == CONTAINER and cols[3].endswith("Mi"):
+            peak = max(peak, int(cols[3][:-2]))
+    return peak
+
+
+def squeeze_patch(c, base):
+    """Trim memory headroom to just above what the workload uses at base load.
+
+    Calibrated on the cluster rather than guessed, because the band that makes a failure
+    metastable is per-workload: a limit under the base-load working set is plain starvation,
+    and one far above it survives the spike and produces nothing.
+    """
+    ws = working_set_mi()
+    if ws <= 0:
+        sys.exit("FAIL cannot read the working set; is metrics-server up?")
+    limit = f"{max(16, int(ws * float(PARAMS.get('headroom', 1.15))))}Mi"
+    json.dump({"memory_limit": limit, "working_set_mi": ws}, open("calibration.json", "w"))
+    res = dict(c.get("resources") or {})
+    lim, req = dict(res.get("limits") or {}), dict(res.get("requests") or {})
+    lim["memory"] = limit
+    # A request above its own limit is rejected at admission, so move it down too.
+    if req.get("memory"):
+        req["memory"] = limit
+    res["limits"] = lim
+    if req:
+        res["requests"] = req
+    return [{"op": "add", "path": f"{base}/resources", "value": res}]
+
+
+def baseline():
+    """Record the workload's state with the predisposition applied but the spike not yet run."""
+    facts = pod_facts()
+    json.dump(facts, open("baseline.json", "w"))
+    print(f"baseline={facts}")
+
+
+def metastable(window):
+    """Is the failure still running now that the spike is over and load is back to base?
+
+    Two things must hold together or it is not metastable: the predisposition alone was
+    harmless, and the symptom outlived the transient that started it.
+    """
+    try:
+        base = json.load(open("baseline.json"))
+    except FileNotFoundError:
+        return False, "no baseline.json; simulate.sh never recorded the pre-spike state"
+    if base.get("ready", 0) < 1:
+        return False, f"predisposition alone already broke it ({base}): starvation, not metastable"
+    first = pod_facts()
+    time.sleep(window)
+    second = pod_facts()
+    if second["restarts"] > first["restarts"]:
+        return True, f"restarts {first['restarts']}->{second['restarts']} with the spike over"
+    if first["ready"] == 0 and second["ready"] == 0:
+        return True, f"no Ready pod across {window}s with the spike over"
+    return False, f"recovered once the spike stopped: {second}"
+
+
 def build_patch():
     """Emit the JSON patch for this op, computed against the LIVE spec, not the manifest."""
     obj = live()
@@ -106,6 +174,9 @@ def build_patch():
         if path is None:
             sys.exit(f"FAIL {CONTAINER} has no httpGet/tcpSocket {probe}; cannot repoint a port")
         return [{"op": "replace", "path": base + path, "value": int(bad)}]
+
+    if OP == "squeeze_memory_limit":
+        return squeeze_patch(c, base)
 
     if OP == "inflate_requests":
         res = dict(c.get("resources") or {})
@@ -143,6 +214,9 @@ def applied():
         probe = "livenessProbe" if "liveness" in OP else "readinessProbe"
         p = c.get(probe) or {}
         return str((p.get("httpGet") or p.get("tcpSocket") or {}).get("port")) == str(bad)
+    if OP == "squeeze_memory_limit":
+        want = json.load(open("calibration.json"))["memory_limit"]
+        return ((c.get("resources") or {}).get("limits") or {}).get("memory") == want
     if OP == "inflate_requests":
         req = (c.get("resources") or {}).get("requests") or {}
         return all(req.get(k.split("=")[0].strip()) == v.strip()
@@ -223,6 +297,13 @@ if __name__ == "__main__":
         sym, facts = symptom_holds(SPEC["symptom_class"])
         print(f"mutation_applied={ok} symptom_holds={sym} pods={facts}")
         sys.exit(0 if (ok and sym) else 1)
+    elif cmd == "baseline":
+        baseline()
+    elif cmd == "assert-metastable":
+        ok = applied()
+        sym, why = metastable(int(sys.argv[2]))
+        print(f"mutation_applied={ok} symptom_holds={sym} pods={why}")
+        sys.exit(0 if (ok and sym) else 1)
     elif cmd == "restore":
         restore()
     elif cmd == "assert-recovered":
@@ -231,7 +312,7 @@ if __name__ == "__main__":
         print(f"spec_restored={ok} pods={f}")
         sys.exit(0 if (ok and f["ready"] > 0) else 1)
     else:
-        sys.exit(f"usage: _lib.py patch|assert-applied|restore|assert-recovered")
+        sys.exit("usage: _lib.py patch|assert-applied|baseline|assert-metastable|restore|assert-recovered")
 '''
 
 
@@ -246,7 +327,9 @@ cd "$(dirname "$0")"
 
 def _source(spec: dict, context: str, namespace: str) -> str:
     """The shell that fetches what a check asserts on: a field, a log tail, or an exec."""
-    kube = f"kubectl --context={context} -n {namespace}"
+    # A check may assert on another namespace: proof that a host-level probe is attached
+    # lives with the injector's DaemonSet, not with the workload it damages.
+    kube = f"kubectl --context={context} -n {spec.get('namespace', namespace)}"
     if spec.get("logs"):
         since = spec.get("since", "3m")
         return (f"{kube} logs {spec['logs']} --all-containers --tail=400 --since={since} "
@@ -397,9 +480,130 @@ def _render_sregym(v: Variant, context: str) -> dict[str, str]:
     }
 
 
-def render(variant: Variant, context: str = "evals_gke", op: str = "") -> dict[str, str]:
+def _render_composite(v: Variant, context: str, ops: dict) -> dict[str, str]:
+    """Independent faults as one incident: each member keeps its own bundle, in its own directory.
+
+    Delegating to real sub-bundles is the only way a composite can mix engines and namespaces
+    without this renderer growing a second copy of either path.
+    """
+    dirs = [(f"member{i}-{m['id']}", m) for i, m in enumerate(v.members, start=1)]
+    files: dict[str, str] = {}
+    for name, m in dirs:
+        sub = render(Variant(**m), context=context, op=(ops or {}).get(m["template_id"], ""), ops=ops)
+        files.update({f"{name}/{fn}": body for fn, body in sub.items()})
+
+    def steps(script: str, reverse: bool = False) -> list[str]:
+        order = reversed(dirs) if reverse else dirs
+        return [f'echo "== {n}"' + "\n" + f'( cd "{n}" && ./{script} )' for n, _ in order]
+
+    # set -e in the preamble means a failing member aborts before any summary line is printed.
+    files["simulate.sh"] = _preamble(v, "simulate", f"inject {len(dirs)} independent faults") + "\n" + "\n".join(
+        steps("simulate.sh") + [f'echo "injected {v.id}; now run ./validate.sh"', ""])
+    files["validate.sh"] = _preamble(v, "validate", "prove every member fault is live") + "\n" + "\n".join(
+        steps("validate.sh")
+        + ["# Only reached when every member validated; the runner parses the next line.",
+           f'echo "mutation_applied=True symptom_holds=True pods=composite:{len(dirs)}"',
+           f'echo "VALID {v.id}  symptom_class={v.symptom_class}"', ""])
+    # Reverse order, so a member whose recovery depends on another's is undone first.
+    files["recover.sh"] = _preamble(v, "recover", "undo every member fault") + "\n" + "\n".join(
+        steps("recover.sh", reverse=True) + [f'echo "recovered {v.id}; now run ./verify_recovered.sh"', ""])
+    files["verify_recovered.sh"] = _preamble(v, "verify_recovered", "prove the cluster is clean again") + "\n" + "\n".join(
+        steps("verify_recovered.sh", reverse=True)
+        + ['echo "spec_restored=True pods=ready"', f'echo "CLEAN {v.id}"', ""])
+
+    import json as _json
+    files["spec.json"] = _json.dumps({
+        "variant_id": v.id, "context": context, "namespace": v.namespace,
+        "engine": "composite", "symptom_class": v.symptom_class, "root_cause": v.root_cause,
+        "template_id": v.template_id, "category": v.category, "fault_level": v.fault_level,
+        "members": [{"dir": n, "id": m["id"], "template_id": m["template_id"],
+                     "namespace": m["namespace"], "workload": m["workload"]} for n, m in dirs],
+    }, indent=2) + "\n"
+    return files
+
+
+def _scale(step: dict, context: str, namespace: str) -> str:
+    """A trigger step is a scale and nothing else: a template is data, not a shell script."""
+    if not step:
+        return "true"
+    return f"kubectl --context={context} -n {namespace} scale {step['scale']} --replicas={step['replicas']}"
+
+
+def _render_metastable(v: Variant, context: str, op: str) -> dict[str, str]:
+    """A fault that outlives the thing that caused it.
+
+    The protocol is what makes it metastable, not the mutation: run base load, prove the
+    predisposition alone is harmless, spike, then drop back to the SAME base load. Withdrawing
+    to zero would prove nothing — every load-driven loop dies when the load does.
+    """
+    t, ref = v.trigger, v.workload
+    kube = f"kubectl --context={context} -n {v.namespace}"
+    settle, hold, window = int(t.get("settle", 90)), int(t.get("hold", 120)), int(t.get("window", 90))
+    simulate = _preamble(v, "simulate", f"predispose, then spike and withdraw ({op})") + f"""
+{kube} get {ref} -o json > original.json
+echo "snapshot: original.json"
+
+# Base load first: the limit is calibrated against what the workload uses WITH traffic on.
+{_scale(t.get("warm"), context, v.namespace)}
+{kube} rollout status {t["warm"]["scale"]} --timeout=180s || true
+echo "warming {settle}s at base load"; sleep {settle}
+
+python3 _lib.py patch
+{kube} patch {ref} --type=json --patch-file patch.json
+{kube} rollout status {ref} --timeout=180s || true
+echo "settling {settle}s before the baseline reading"; sleep {settle}
+
+# The baseline is the control: if the workload is already unhealthy here, the predisposition
+# alone did it, and what follows is starvation rather than a metastable failure.
+python3 _lib.py baseline
+
+{_scale(t.get("apply"), context, v.namespace)}
+echo "spike held for {hold}s"; sleep {hold}
+{_scale(t.get("withdraw"), context, v.namespace)}
+echo "spike withdrawn; load is back to base"
+echo "injected {v.id}; now run ./validate.sh"
+"""
+    validate = _preamble(v, "validate", "prove the failure outlived the spike") + f"""
+test -f baseline.json || {{ echo "FAIL no baseline.json — simulate.sh has not run"; exit 2; }}
+# Samples twice across {window}s with the spike already over: a residue that is not still
+# progressing is a system recovering slowly, not one stuck in a self-sustaining loop.
+python3 _lib.py assert-metastable {window}
+echo "VALID {v.id}  symptom_class={v.symptom_class}"
+"""
+    recover = _preamble(v, "recover", "stop the load, then put the snapshot back") + f"""
+# Load off first: restoring the spec under a running spike just re-enters the loop.
+{_scale(t.get("stop"), context, v.namespace)}
+test -f original.json || {{ echo "FAIL no original.json — nothing to restore"; exit 2; }}
+python3 _lib.py restore
+{kube} patch {ref} --type=json --patch-file recover-patch.json
+{kube} rollout status {ref} --timeout=180s
+echo "recovered {v.id}; now run ./verify_recovered.sh"
+"""
+    verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + f"""
+python3 _lib.py assert-recovered
+echo "CLEAN {v.id}"
+"""
+    import json as _json
+    spec = {
+        "variant_id": v.id, "context": context, "namespace": v.namespace,
+        "kind": ref.split("/")[0], "name": ref.split("/")[1], "container": v.container,
+        "op": op, "params": v.params, "trigger": t, "symptom_class": v.symptom_class,
+        "root_cause": v.root_cause, "template_id": v.template_id, "category": v.category,
+        "fault_level": v.fault_level,
+    }
+    return {"simulate.sh": simulate, "validate.sh": validate, "recover.sh": recover,
+            "verify_recovered.sh": verify, "_lib.py": _LIB,
+            "spec.json": _json.dumps(spec, indent=2) + "\n"}
+
+
+def render(variant: Variant, context: str = "evals_gke", op: str = "",
+           ops: dict | None = None) -> dict[str, str]:
     """Return {filename: contents} for the whole bundle, including spec.json and _lib.py."""
     v, ref = variant, variant.workload
+    if getattr(v, "members", None):
+        return _render_composite(v, context, ops or {})
+    if getattr(v, "trigger", None):
+        return _render_metastable(v, context, op)
     if getattr(v, "engine", "spec") == "sregym":
         return _render_sregym(v, context)
     simulate = _preamble(v, "simulate", f"inject the fault ({_OPS.get(op, op)})") + f"""
