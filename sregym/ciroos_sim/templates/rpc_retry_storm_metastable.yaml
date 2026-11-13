@@ -1,0 +1,56 @@
+id: rpc_retry_storm_metastable
+mechanism: gRPC clients given a 50ms timeout and 30 retries, so one traffic spike turns every
+  slow call into a retry flood that keeps itself fed after the spike is gone
+category: Metastable Failure
+fault_level: App
+primitive: rpc_timeout_retries_misconfiguration
+engine: sregym
+symptom_class: metastable-retry-storm
+requires:
+  app: blueprint-hotel   # its trigger scales a load generator that only this app has
+  kind: deployment
+  # Every service in this app reads the rpc ConfigMap, so binding per service would emit the
+  # same fault eight times. The frontend is where the retry fan-out starts.
+  workload_in: [frontend-service]
+invoke:
+  inject: {configmap: rpc}
+  recover: {configmap: rpc}
+trigger:
+  # Base load is ONE replica; the rate is the generator's TPUT. This fault INJECTS and
+  # reproduces (OOMKill, memory 31Mi->8.5GB unbounded), but landing it in the metastable
+  # window — fires under the spike, sustains after, yet is not already broken at base — is an
+  # open calibration problem. Measured: TPUT 300 self-heals, 450 already starves at base with
+  # the 1Gi limit, and the knee moves with the limit. A fixed value will not reliably validate;
+  # this needs SREGym's calibration-ladder search over TPUT x limit. Left generated, not valid.
+  warm: {scale: "deployment/bhotelwrk-wlgen", replicas: 1}
+  settle: 90
+  apply: {scale: "deployment/bhotelwrk-wlgen", replicas: 4}
+  hold: 150
+  withdraw: {scale: "deployment/bhotelwrk-wlgen", replicas: 1}
+  window: 90
+  stop: {scale: "deployment/bhotelwrk-wlgen", replicas: 0}
+  # The baseline proved the 50ms/30-retry config alone was harmless at this load. The symptom
+  # is that the workload now keeps dying at that SAME load: the amplified queue outgrows its
+  # memory limit, is killed, and the storm refills it. Restarts climbing through the window,
+  # with the spike already over, is that loop. Measured CPU amplification was only 1.59x of
+  # baseline here, so a CPU ratio would have called a genuine catastrophic failure "recovered".
+  sustain: {metric: restarts}
+checks:
+  applied:
+    get: configmap/rpc
+    jsonpath: "{.data.GRPC_CLIENT_TIMEOUT}"
+    equals: 50ms
+    retries: 6
+    delay: 5
+params:
+  difficulty: hard
+  observable: Latency and CPU stay elevated at a request rate the system served fine before
+root_cause_template: >-
+  The `rpc` ConfigMap gives every gRPC client in this app a 50ms timeout with 30 retries on
+  error. Base traffic is served fine, but one spike pushes calls past 50ms, and each timeout
+  becomes 31 attempts. The amplified load keeps calls over the timeout, so the storm sustains
+  itself at the base traffic the app used to handle.
+public_instances:
+  - load_spike_rpc_retry_storm
+  - capacity_decrease_rpc_retry_storm
+  - search_rate_retry_collapse_hotel_reservation
