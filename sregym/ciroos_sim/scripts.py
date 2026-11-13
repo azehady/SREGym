@@ -17,7 +17,7 @@ from sregym.ciroos_sim.generator import Variant
 CONTRACT = ("simulate.sh", "validate.sh", "recover.sh", "verify_recovered.sh")
 
 # Pull one value out of the pre-injection snapshot, for a recovery argument.
-_READ_SNAPSHOT = ('import json;o=json.load(open("original.json"))\n'
+_READ_SNAPSHOT = ('import json;o=json.load(open("%s"))\n'
                   'for k in "%s".split("."): o = o[int(k)] if k.isdigit() else o[k]\n'
                   'print(o)')
 
@@ -292,89 +292,101 @@ def _check(spec: dict, context: str, namespace: str, label: str, negate: bool = 
 
 
 def _render_sregym(v: Variant, context: str) -> dict[str, str]:
-    """Bundle that drives a real SREGym primitive, rather than our own JSON patch.
+    """Bundle that drives real SREGym primitives, rather than our own JSON patch.
 
     The primitive owns both halves of the lifecycle, so recovery calls its recover_* rather
-    than restoring a snapshot; the snapshot is still taken as a backstop for inspection.
+    than restoring a snapshot. A correlated fault is the same primitive driven over several
+    workloads at once, so every phase here is a loop over the variant's targets.
     """
     repo = "${CIROOS_SIM_REPO:-/workspace/home/ciroos/SREGym}"
     py = f'"{repo}/.venv/bin/python"'
-    def invoke(action: str, flags: str = "") -> str:
+    kube = f"kubectl --context={context} -n {v.namespace}"
+    targets = v.targets or [{"name": v.workload.split("/")[-1], "ref": v.workload, "checks": v.checks}]
+    multi = len(targets) > 1
+
+    def snap(t: dict) -> str:
+        return f"original-{t['name']}.json" if multi else "original.json"
+
+    def sub(val, t: dict):
+        return val.replace("{name}", t["name"]).replace("{ref}", t["ref"]) if isinstance(val, str) else val
+
+    def invoke(action: str, t: dict, flags: str = "") -> str:
         # Built per action rather than formatted: the repo default holds shell ${VAR:-...}.
         return (f'{py} -m sregym.ciroos_sim.invoke {action} --primitive {v.primitive} '
-                f'--namespace {v.namespace} --workload {v.workload.split("/")[-1]} '
+                f'--namespace {v.namespace} --workload {t["name"]} '
                 f'--context {context} {flags}'.rstrip())
 
-    def params(action: str) -> tuple[str, str]:
-        """(preamble, --param flags) for one action's extra arguments.
+    def params(action: str, t: dict) -> tuple[str, str]:
+        """(preamble, --param flags) for one target's extra arguments.
 
-        A primitive that mutates a field cannot always invert it: recover_incorrect_image
+        A primitive that overwrites a field cannot always invert it: recover_incorrect_image
         wants the image it replaced. `@snapshot:` reads that value back out of the snapshot
         simulate.sh took, so recovery replays captured state rather than guessing.
         """
         pre, flags = [], []
         for key, val in (v.invoke.get(action) or {}).items():
+            var = f"{key.upper()}_{t['name'].replace('-', '_').upper()}" if multi else key.upper()
             if isinstance(val, str) and val.startswith("@snapshot:"):
-                var = key.upper()
-                pre.append(f"{var}=$(python3 -c {shlex.quote(_READ_SNAPSHOT % val[10:])})")
+                pre.append(f"{var}=$(python3 -c {shlex.quote(_READ_SNAPSHOT % (snap(t), val[10:]))})")
                 flags.append(f'--param {key}="${var}"')
             else:
-                flags.append("--param " + shlex.quote(f"{key}={val}"))
+                flags.append("--param " + shlex.quote(f"{key}={sub(val, t)}"))
         return "\n".join(pre), " ".join(flags)
 
-    inject_pre, inject_flags = params("inject")
-    recover_pre, recover_flags = params("recover")
-    applied = v.checks.get("applied", {})
-    symptom = v.checks.get("symptom", {})
-    # Recovery is proven by the template's own check when it names one, because the workload
-    # a primitive damages is not always the one the variant is bound to.
-    recovered = v.checks.get("recovered", {})
+    def phase(action: str) -> str:
+        """Snapshot reads happen in the bundle directory, the invokes in the repo."""
+        pre = [p for p, _ in (params(action, t) for t in targets) if p]
+        calls = [invoke(action, t, f) for t, (_, f) in ((t, params(action, t)) for t in targets)]
+        return "\n".join([*pre, f'cd "{repo}"', *calls, "cd - >/dev/null"])
 
-    simulate = _preamble(v, "simulate", f"inject via the {v.primitive} primitive") + f"""
-# Snapshot first: the primitive owns recovery, but a stranded fault needs a reference.
-kubectl --context={context} -n {v.namespace} get {v.workload} -o json > original.json
-{inject_pre}
-cd "{repo}" && {invoke("inject", inject_flags)}
-echo "injected {v.id}; now run ./validate.sh"
-"""
+    def checks_for(t: dict, phase_name: str, label: str, negate: bool = False) -> str:
+        tag = f"{label}[{t['name']}]" if multi else label
+        return _check(t["checks"].get(phase_name, {}), context, v.namespace, tag, negate=negate)
 
-    validate = _preamble(v, "validate", "prove the fault is live, not merely invoked") + f"""
-# The primitive reports success on its own terms; these assert the cluster actually changed.
-{_check(applied, context, v.namespace, "mutation_applied")}
-{_check(symptom, context, v.namespace, "symptom_holds")}
-# The runner parses this line; both checks above exit non-zero before reaching it.
-echo "mutation_applied=True symptom_holds=True pods=primitive:{v.primitive}"
-echo "VALID {v.id}  symptom_class={v.symptom_class}"
-"""
+    simulate = _preamble(v, "simulate", f"inject via the {v.primitive} primitive") + "\n" + "\n".join(
+        [f"# Snapshot first: the primitive owns recovery, but a stranded fault needs a reference."]
+        + [f"{kube} get {t['ref']} -o json > {snap(t)}" for t in targets]
+        + [phase("inject"), f'echo "injected {v.id}; now run ./validate.sh"', ""])
+
+    validate = _preamble(v, "validate", "prove the fault is live, not merely invoked") + "\n" + "\n".join(
+        ["# The primitive reports success on its own terms; these assert the cluster changed."]
+        + [checks_for(t, "applied", "mutation_applied") for t in targets]
+        + [checks_for(t, "symptom", "symptom_holds") for t in targets]
+        + ["# The runner parses this line; every check above exits non-zero before reaching it.",
+           f'echo "mutation_applied=True symptom_holds=True pods=primitive:{v.primitive}x{len(targets)}"',
+           f'echo "VALID {v.id}  symptom_class={v.symptom_class}"', ""])
 
     # Some primitives park the workload at zero to roll it; put the replica count back too.
-    replicas = (f'REPLICAS=$(python3 -c {shlex.quote(_READ_SNAPSHOT % "spec.replicas")})\n'
-                f'kubectl --context={context} -n {v.namespace} scale {v.workload} '
-                f'--replicas="$REPLICAS"') if v.invoke.get("restore_replicas") else ""
-    recover = _preamble(v, "recover", f"undo via the {v.primitive} primitive") + f"""
-{recover_pre}
-cd "{repo}" && {invoke("recover", recover_flags)}
-cd - >/dev/null
-{replicas}
-kubectl --context={context} -n {v.namespace} rollout status {v.workload} --timeout=180s || true
-echo "recovered {v.id}; now run ./verify_recovered.sh"
-"""
+    replicas = []
+    for t in targets:
+        if v.invoke.get("restore_replicas"):
+            var = f"REPLICAS_{t['name'].replace('-', '_').upper()}"
+            replicas += [f"{var}=$(python3 -c {shlex.quote(_READ_SNAPSHOT % (snap(t), 'spec.replicas'))})",
+                         f'{kube} scale {t["ref"]} --replicas="${var}"']
+    recover = _preamble(v, "recover", f"undo via the {v.primitive} primitive") + "\n" + "\n".join(
+        [phase("recover"), *replicas]
+        + [f"{kube} rollout status {t['ref']} --timeout=180s || true" for t in targets]
+        + [f'echo "recovered {v.id}; now run ./verify_recovered.sh"', ""])
 
-    verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + f"""
-# The applied-check must now FAIL to hold, and the workload must be serving again.
-{_check(applied, context, v.namespace, "mutation_gone", negate=True)}
-{_check(recovered, context, v.namespace, "dependency_healthy") if recovered else 'echo "skip dependency_healthy: no extra check"'}
-ready=$(kubectl --context={context} -n {v.namespace} get {v.workload} -o jsonpath='{{.status.readyReplicas}}' 2>/dev/null || true)
-if [ -z "$ready" ] || [ "$ready" -lt 1 ]; then echo "spec_restored=False pods=not-ready"; echo "FAIL {v.workload} has no Ready replica"; exit 1; fi
-echo "spec_restored=True pods=ready:$ready"
-echo "CLEAN {v.id}"
-"""
+    verify_lines = ["# Every applied-check must now FAIL to hold, and each workload must serve again."]
+    for t in targets:
+        verify_lines.append(checks_for(t, "applied", "mutation_gone", negate=True))
+        if t["checks"].get("recovered"):
+            verify_lines.append(checks_for(t, "recovered", "dependency_healthy"))
+        verify_lines += [
+            f"""ready=$({kube} get {t['ref']} -o jsonpath='{{.status.readyReplicas}}' 2>/dev/null || true)""",
+            f"""if [ -z "$ready" ] || [ "$ready" -lt 1 ]; then echo "spec_restored=False pods=not-ready";"""
+            f""" echo "FAIL {t['ref']} has no Ready replica"; exit 1; fi""",
+        ]
+    verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + "\n" + "\n".join(
+        verify_lines + ['echo "spec_restored=True pods=ready"', f'echo "CLEAN {v.id}"', ""])
+
     import json as _json
     spec = {
         "variant_id": v.id, "context": context, "namespace": v.namespace,
         "kind": v.workload.split("/")[0], "name": v.workload.split("/")[1],
         "container": v.container, "engine": "sregym", "primitive": v.primitive,
-        "checks": v.checks, "invoke": v.invoke, "params": v.params,
+        "checks": v.checks, "invoke": v.invoke, "params": v.params, "targets": targets,
         "symptom_class": v.symptom_class, "root_cause": v.root_cause,
         "template_id": v.template_id, "category": v.category, "fault_level": v.fault_level,
     }

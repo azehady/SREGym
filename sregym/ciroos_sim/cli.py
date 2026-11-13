@@ -124,10 +124,13 @@ def cmd_live_validate(args) -> int:
                 os.chmod(path, 0o755)
         spec = {"id": v.id, "template_id": v.template_id, "namespace": v.namespace,
                 "workload": v.workload, "container": v.container, "params": v.params,
-                "symptom_class": v.symptom_class}
-        # A fault injected into an already-broken workload proves nothing.
-        if not runner.wait_ready(args.context, v.namespace, v.workload):
-            print(f"SKIP {v.id}: {v.workload} is not Ready before injection")
+                "targets": v.targets, "symptom_class": v.symptom_class}
+        # A fault injected into an already-broken workload proves nothing — and for a
+        # correlated set, every member has to be healthy, not just the one it is named for.
+        refs = [t["ref"] for t in v.targets] or [v.workload]
+        unhealthy = [r for r in refs if not runner.wait_ready(args.context, v.namespace, r)]
+        if unhealthy:
+            print(f"SKIP {v.id}: {', '.join(unhealthy)} not Ready before injection")
             registry.stamp(spec, verdict="failed", note="workload not Ready at baseline")
             rc = 1
             continue
@@ -146,6 +149,15 @@ def cmd_live_validate(args) -> int:
 
 def cmd_export(args) -> int:
     templates, inventory = _load(args)
+    # A cluster export silently substitutes manifests for any app that is not deployed, which
+    # ships variants bound to workloads no cluster has. Catch it here rather than at run time.
+    if args.source == "cluster" and not getattr(args, "no_manifest_fallback", False):
+        live = build_inventory("cluster", args.context, namespaces=_ns_map(args.ns),
+                               manifest_fallback=False)
+        ghosts = sorted({t.app for t in inventory} - {t.app for t in live})
+        if ghosts:
+            raise SystemExit(f"refusing to export: {', '.join(ghosts)} came from manifests, not "
+                             f"the cluster. Re-run with --no-manifest-fallback.")
     accepted, rejected = partition(
         generate(templates, inventory, seed=args.seed, novel_only=not args.include_public)
     )

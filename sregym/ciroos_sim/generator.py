@@ -43,6 +43,7 @@ class Variant:
     engine: str = "spec"
     checks: dict = field(default_factory=dict)   # declarative assertions for a primitive fault
     invoke: dict = field(default_factory=dict)   # extra args for the primitive, per action
+    targets: list[dict] = field(default_factory=list)  # every workload this variant damages
 
 
 def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int) -> bool:
@@ -107,6 +108,52 @@ def _bind(block: dict, target: WorkloadTarget) -> dict:
             for phase, spec in (block or {}).items()}
 
 
+def _target(template: FaultTemplate, target: WorkloadTarget) -> dict:
+    """One workload a variant damages, with its checks already resolved against it."""
+    return {"name": target.name, "ref": target.ref, "checks": _bind(template.checks, target)}
+
+
+def _fanout(template: FaultTemplate, inventory: list[WorkloadTarget], apps, public, novel_only) -> list[Variant]:
+    """One variant over several workloads: a correlated failure is a single cause with many
+    victims, which a one-target binding cannot express. Sliding windows, so the sets differ."""
+    out: list[Variant] = []
+    groups: dict[tuple[str, str], list[WorkloadTarget]] = {}
+    seen: set[str] = set()
+    for t in sorted((t for t in inventory if (not apps or t.app in apps) and t.containers
+                     and _fits(template, t, 0)), key=lambda t: t.name):
+        # One app at a time, and each workload once: a set spanning two namespaces is not a
+        # shared cause, and the same workload repeated is not a correlated failure at all.
+        if t.ref in seen:
+            continue
+        seen.add(t.ref)
+        groups.setdefault((t.app, t.namespace), []).append(t)
+    windows = [g[i:i + template.fanout] for g in groups.values()
+               for i in range(len(g) - template.fanout + 1)]
+    for window in windows:
+        head = window[0]
+        novel = _is_novel(template, head, public)
+        if novel_only and not novel:
+            continue
+        names = ", ".join(t.ref for t in window)
+        root_cause = template.root_cause_template.format(
+            container=head.containers[0].name, workload=names, name=head.name,
+            env_key="", bad_value="")
+        key = "|".join(t.name for t in window)
+        out.append(Variant(
+            id=f"sim_{template.id}_{head.name}_{hashlib.sha1(key.encode()).hexdigest()[:6]}",
+            template_id=template.id, mechanism=template.mechanism, category=template.category,
+            fault_level=template.fault_level, primitive=template.primitive, app=head.app,
+            namespace=head.namespace, workload=head.ref, container=head.containers[0].name,
+            params={"env_key": "", "bad_value": "", "workloads": names},
+            root_cause=f"[fault_spec] component={names}; namespace={head.namespace} || {root_cause}",
+            symptom_class=template.symptom_class, difficulty_hint=template.difficulty_hint,
+            novel=novel, provenance={"source": "ciroos_sim", "fanout": template.fanout},
+            engine=template.engine, checks=_bind(template.checks, head), invoke=template.invoke,
+            targets=[_target(template, t) for t in window],
+        ))
+    return out
+
+
 def _is_novel(template: FaultTemplate, target: WorkloadTarget, public_pairs: set[tuple[str, str]]) -> bool:
     """Novel when this (mechanism, workload) pair is not already a public SREGym problem."""
     return (template.id, target.name) not in public_pairs
@@ -137,6 +184,9 @@ def generate(
     public = public_pairs_from(templates, inventory)
     out: list[Variant] = []
     for template in templates:
+        if template.fanout:
+            out.extend(_fanout(template, inventory, apps, public, novel_only))
+            continue
         for target in inventory:
             if apps and target.app not in apps:
                 continue
@@ -169,7 +219,10 @@ def generate(
                     provenance={"seed": seed, "source": "ciroos_sim"},
                     engine=template.engine,
                     checks=_bind(template.checks, target),
-                    invoke=_bind(template.invoke, target),
+                    # Left unbound: the renderer resolves {name} per target, which is the
+                    # only correct answer once a variant has more than one.
+                    invoke=template.invoke,
+                    targets=[_target(template, target)],
                 ))
     out.sort(key=lambda v: v.id)
     return out[:limit] if limit else out

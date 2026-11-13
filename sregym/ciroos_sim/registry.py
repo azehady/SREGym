@@ -35,9 +35,12 @@ def fingerprint(spec: dict) -> str:
     The generated id is a label, not an identity.
     """
     params = spec.get("params") or {}
-    return "|".join([spec.get("template_id", ""), spec.get("namespace", ""),
-                     spec.get("workload", ""), spec.get("container", ""),
-                     params.get("env_key", "") or ""])
+    base = [spec.get("template_id", ""), spec.get("namespace", ""), spec.get("workload", ""),
+            spec.get("container", ""), params.get("env_key", "") or ""]
+    # A correlated variant damages several workloads, and two sets can share a first member.
+    # Appended only when there are others, so a single-target key keeps its original shape.
+    others = [t.get("ref", "") for t in (spec.get("targets") or [])[1:]]
+    return "|".join(base + ([",".join(others)] if others else []))
 
 
 def _now() -> str:

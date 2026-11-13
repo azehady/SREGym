@@ -1,0 +1,37 @@
+id: faulty_image_correlated
+mechanism: One bad release rolls several services onto image tags that do not exist
+category: Correlated Failure
+fault_level: Container
+primitive: incorrect_image
+engine: sregym
+symptom_class: image-pull-failure
+fanout: 3
+requires:
+  kind: deployment
+invoke:
+  inject:
+    bad_image: "ghcr.io/open-telemetry/demo:2.2.0-{name}-ciroos-sim-absent"
+  recover:
+    correct_image: "@snapshot:spec.template.spec.containers.0.image"
+  restore_replicas: true
+params:
+  difficulty: medium
+  observable: three unrelated services fail to pull at once; no single workload explains it
+checks:
+  applied:
+    get: "{ref}"
+    jsonpath: "{.spec.template.spec.containers[0].image}"
+    contains: "ciroos-sim-absent"
+    retries: 6
+    delay: 5
+  symptom:
+    get: "pods -l io.kompose.service={name}"
+    jsonpath: "{.items[*].status.containerStatuses[*].state.waiting.reason}"
+    contains: "ImagePullBackOff|ErrImagePull"
+    retries: 18
+    delay: 10
+root_cause_template: >-
+  A single bad release rolled {workload} onto image tags that do not exist, so all of them
+  stay in ImagePullBackOff at once; the shared cause is the release, not any one service.
+public_instances:
+  - faulty_image_correlated

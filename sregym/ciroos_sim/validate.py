@@ -73,10 +73,12 @@ def check(variant: Variant) -> Verdict:
     """Static gate. Live symptom confirmation is a separate, cluster-side step."""
     key = (variant.params or {}).get("env_key", "") or ""
 
-    if _is_evidence_plane(variant.workload):
-        return Verdict(False, "targets the telemetry plane; would blind the agent's evidence")
-    if _is_infra(variant.workload):
-        return Verdict(False, "targets cluster infrastructure rather than the app under test")
+    # Every workload, not just the primary: one bad member poisons a whole correlated set.
+    for ref in {variant.workload, *(t["ref"] for t in variant.targets or [])}:
+        if _is_evidence_plane(ref):
+            return Verdict(False, f"{ref} is the telemetry plane; would blind the agent's evidence")
+        if _is_infra(ref):
+            return Verdict(False, f"{ref} is cluster infrastructure rather than the app under test")
     if key and _is_secret(key):
         return Verdict(False, f"would mutate a credential ({key})")
 
