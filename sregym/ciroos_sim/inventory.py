@@ -21,6 +21,10 @@ APP_SOURCES: dict[str, dict] = {
     "hotel-reservation": {"namespace": "hotel-reservation", "dirs": ["hotelReservation/kubernetes"]},
     "social-network": {"namespace": "social-network", "dirs": ["socialNetwork"]},
     "train-ticket": {"namespace": "train-ticket", "dirs": ["train-ticket/deployment/kubernetes-manifests"]},
+    # The only app whose services read GRPC_CLIENT_TIMEOUT/RETRIES_ON_ERROR, which is the
+    # mechanism behind every one of SREGym's Metastable problems.
+    "blueprint-hotel": {"namespace": "orca-bench-blueprint-hotel",
+                        "dirs": ["BlueprintHotelReservation/kubernetes"]},
 }
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 

@@ -72,6 +72,11 @@ def _fits(template: FaultTemplate, target: WorkloadTarget, container_index: int)
     # template can name the workloads it is meaningful for.
     if req.get("workload_in") and target.name not in req["workload_in"]:
         return False
+    # A template whose trigger scales a named deployment only makes sense in the app that has
+    # it: without this, the metastable templates bound to workloads in the other app and then
+    # failed at inject time on a NotFound for a load generator that lives elsewhere.
+    if req.get("app") and target.app != req["app"]:
+        return False
     return True
 
 
@@ -226,6 +231,13 @@ def _bindings(template: FaultTemplate, inventory: list[WorkloadTarget], apps, pu
     return out
 
 
+def _compose_key(picks) -> str:
+    """The registry fingerprint this set of members would be stamped under."""
+    from sregym.ciroos_sim import registry
+
+    return "compose|" + ",".join(sorted(registry.fingerprint(asdict(p)) for p in picks))
+
+
 def _compose(template: FaultTemplate, pool: list[Variant], limit: int) -> list[Variant]:
     """Several unrelated faults in one incident, which is what makes them hard to tell apart.
 
@@ -233,7 +245,10 @@ def _compose(template: FaultTemplate, pool: list[Variant], limit: int) -> list[V
     engine, namespace and checks — the renderer then runs each as its own sub-bundle.
     """
     # Imported here, not at module scope: the gate imports this module to read Variant.
+    from sregym.ciroos_sim import registry
     from sregym.ciroos_sim.validate import check
+
+    stamped = set(registry.load()["variants"])
 
     wanted = template.compose.get("members") or []
     # Screen members BEFORE truncating. Taking the first twelve by id and rejecting the bad
@@ -254,10 +269,15 @@ def _compose(template: FaultTemplate, pool: list[Variant], limit: int) -> list[V
             continue
         key = "|".join(sorted(f"{p.template_id}@{p.namespace}/{p.workload}" for p in picks))
         cross = len({p.namespace for p in picks}) == len(picks)
-        # Cross-namespace first (one namespace invites a shared-cause explanation), then in
+        # Anything already proven on a cluster ranks first, unconditionally. Composite
+        # membership depends on the whole pool, so deploying another app reshuffles the lanes
+        # and silently drops proven pairs out of the catalogue — the live verdict survives in
+        # the registry with nothing left to attach it to.
+        proven = 0 if _compose_key(picks) in stamped else 1
+        # Then cross-namespace (one namespace invites a shared-cause explanation), then in
         # diagonal order, so a truncated list still draws evenly from every lane instead of
         # pairing the whole of one lane against the alphabetically first member of the next.
-        candidates.append(((0 if cross else 1, max(idx), sum(idx), key), picks))
+        candidates.append(((proven, 0 if cross else 1, max(idx), sum(idx), key), picks))
     out: list[Variant] = []
     for rank, picks in sorted(candidates, key=lambda c: c[0])[:limit]:
         key = rank[-1]

@@ -131,7 +131,7 @@ def cmd_live_validate(args) -> int:
                 # Both of these are part of the fingerprint, so a stamp written without them
                 # lands under a different key than the catalogue later looks up.
                 "targets": v.targets, "members": v.members, "trigger": v.trigger,
-                "symptom_class": v.symptom_class}
+                "engine": v.engine, "symptom_class": v.symptom_class}
         # A fault injected into an already-broken workload proves nothing — and for a
         # correlated set, every member has to be healthy, not just the one it is named for.
         refs = [t["ref"] for t in v.targets] or [m["workload"] for m in v.members] or [v.workload]

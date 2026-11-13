@@ -80,6 +80,19 @@ def probe_port_path(container, probe):
     return None
 
 
+def cpu_millicores():
+    """What the target container is burning right now, summed across its pods."""
+    sel = live()["spec"]["selector"]["matchLabels"]
+    q = ",".join(f"{k}={v}" for k, v in sel.items())
+    out = kubectl("top", "pods", "-l", q, "--containers", "--no-headers", check=False)
+    total = 0
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 4 and cols[1] == CONTAINER and cols[2].endswith("m"):
+            total += int(cols[2][:-1])
+    return total
+
+
 def working_set_mi():
     """What the target container is actually using right now, in MiB, across its pods."""
     sel = live()["spec"]["selector"]["matchLabels"]
@@ -121,6 +134,7 @@ def baseline():
     """Record the workload's state with the predisposition applied but the spike not yet run."""
     facts = pod_facts()
     facts["memory_mi"] = working_set_mi()
+    facts["cpu_m"] = cpu_millicores()
     json.dump(facts, open("baseline.json", "w"))
     print(f"baseline={facts}")
 
@@ -137,9 +151,34 @@ def metastable(window):
         return False, "no baseline.json; simulate.sh never recorded the pre-spike state"
     if base.get("ready", 0) < 1:
         return False, f"predisposition alone already broke it ({base}): starvation, not metastable"
+    if base.get("restarts", 0) > 0:
+        # Readiness is a snapshot: a pod in a crash loop reads Ready between crashes. If it had
+        # already restarted before the spike, the predisposition alone did it.
+        return False, (f"workload had already restarted {base['restarts']}x before the spike "
+                       f"({base}): starvation, not metastable")
     # Some loops show up as restarts; a leak or a backlog shows up as a number that keeps
     # climbing while the load is back to base. The template says which to watch.
     sustain = TRIGGER.get("sustain") or {}
+    if sustain.get("metric") == "cpu":
+        # The honest measure of retry amplification: the offered load is back to exactly what
+        # the baseline was taken at, so CPU far above the baseline means the system is doing
+        # work the clients never asked for, and is still doing it.
+        factor = float(sustain.get("exceeds_baseline_by", 2.0))
+        floor = int(sustain.get("baseline_floor_m", 50))
+        was = int(base.get("cpu_m") or 0)
+        # A ratio against a near-idle baseline is a measurement of noise: 2.5x of 1m is 3m.
+        # Refuse to call that amplification rather than pass on it.
+        if was < floor:
+            return False, (f"baseline cpu was only {was}m, under the {floor}m floor; the base "
+                           f"load is too small to measure amplification against")
+        time.sleep(window)
+        now = cpu_millicores()
+        if now >= was * factor:
+            return True, (f"cpu {now}m vs {was}m at baseline ({now / was:.1f}x) at the SAME "
+                          f"base load, {window}s after the spike ended")
+        return False, (f"cpu {now}m vs {was}m at baseline; under the {factor}x that would show "
+                       f"amplification outliving the spike")
+
     if sustain.get("metric") == "memory":
         need = int(sustain.get("grows_by", 1))
         first = working_set_mi()
@@ -558,18 +597,48 @@ def _render_metastable(v: Variant, context: str, op: str) -> dict[str, str]:
     t, ref = v.trigger, v.workload
     kube = f"kubectl --context={context} -n {v.namespace}"
     settle, hold, window = int(t.get("settle", 90)), int(t.get("hold", 120)), int(t.get("window", 90))
+    repo = "${CIROOS_SIM_REPO:-/workspace/home/ciroos/SREGym}"
+
+    def invoke(action: str) -> str:
+        """The predisposition as a primitive call, for a fault that is not a container patch."""
+        flags = " ".join("--param " + shlex.quote(f"{k}={val}")
+                         for k, val in (v.invoke.get(action) or {}).items())
+        # `|| true`: several primitives end by waiting for every pod in the namespace to be
+        # Ready, which is a post-condition a fault like this one is designed to violate. Left
+        # strict, the protocol aborts at inject and a later phase reads whatever files the
+        # PREVIOUS run left behind. The applied check decides whether the mutation landed.
+        return (f'cd "{repo}"\n'
+                f'"{repo}/.venv/bin/python" -m sregym.ciroos_sim.invoke {action} '
+                f'--primitive {v.primitive} --namespace {v.namespace} '
+                f'--workload {ref.split("/")[-1]} --context {context} {flags} '
+                f'|| echo "note: {action} primitive reported failure; checks are the authority"\n'
+                f'cd - >/dev/null')
+
+    primitive = getattr(v, "engine", "spec") == "sregym"
+    # A primitive owns both halves of its own lifecycle; a spec op is a patch against a
+    # snapshot. The protocol around them is identical either way.
+    predispose = invoke("inject") if primitive else (
+        f'python3 _lib.py patch\n'
+        f'{kube} patch {ref} --type=json --patch-file patch.json\n'
+        f'{kube} rollout status {ref} --timeout=180s || true')
+    undo = invoke("recover") if primitive else (
+        f'python3 _lib.py restore\n'
+        f'{kube} patch {ref} --type=json --patch-file recover-patch.json\n'
+        f'{kube} rollout status {ref} --timeout=180s')
     simulate = _preamble(v, "simulate", f"predispose, then spike and withdraw ({op})") + f"""
+# Bundle directories are reused between runs, so a stale baseline.json or marker from an
+# earlier run can satisfy a later run's precondition. One run's verdict came from exactly that.
+rm -f baseline.json protocol-done.json calibration.json
 {kube} get {ref} -o json > original.json
 echo "snapshot: original.json"
 
-# Base load first: the limit is calibrated against what the workload uses WITH traffic on.
+# Base load first: the baseline has to be measured with traffic on, or it is not the
+# state the spike knocks the system out of.
 {_scale(t.get("warm"), context, v.namespace)}
 {kube} rollout status {t["warm"]["scale"]} --timeout=180s || true
 echo "warming {settle}s at base load"; sleep {settle}
 
-python3 _lib.py patch
-{kube} patch {ref} --type=json --patch-file patch.json
-{kube} rollout status {ref} --timeout=180s || true
+{predispose}
 echo "settling {settle}s before the baseline reading"; sleep {settle}
 
 # The baseline is the control: if the workload is already unhealthy here, the predisposition
@@ -580,10 +649,21 @@ python3 _lib.py baseline
 echo "spike held for {hold}s"; sleep {hold}
 {_scale(t.get("withdraw"), context, v.namespace)}
 echo "spike withdrawn; load is back to base"
+# Only now is the protocol complete. validate.sh refuses to judge without this.
+printf '{{"variant_id": "%s"}}\\n' "{v.id}" > protocol-done.json
 echo "injected {v.id}; now run ./validate.sh"
 """
+    # A primitive edits something other than this container spec, so _lib.py cannot confirm the
+    # predisposition landed; the template's own check is the only authority.
+    applied_check = (_check(v.checks.get("applied", {}), context, v.namespace, "mutation_applied")
+                     if primitive else "true")
     validate = _preamble(v, "validate", "prove the failure outlived the spike") + f"""
+grep -q '"{v.id}"' protocol-done.json 2>/dev/null || {{
+  echo "FAIL simulate.sh did not finish the protocol for {v.id} (no marker); refusing to judge"
+  exit 2
+}}
 test -f baseline.json || {{ echo "FAIL no baseline.json — simulate.sh has not run"; exit 2; }}
+{applied_check}
 # Samples twice across {window}s with the spike already over: a residue that is not still
 # progressing is a system recovering slowly, not one stuck in a self-sustaining loop.
 python3 _lib.py assert-metastable {window}
@@ -593,12 +673,19 @@ echo "VALID {v.id}  symptom_class={v.symptom_class}"
 # Load off first: restoring the spec under a running spike just re-enters the loop.
 {_scale(t.get("stop"), context, v.namespace)}
 test -f original.json || {{ echo "FAIL no original.json — nothing to restore"; exit 2; }}
-python3 _lib.py restore
-{kube} patch {ref} --type=json --patch-file recover-patch.json
-{kube} rollout status {ref} --timeout=180s
+{undo}
 echo "recovered {v.id}; now run ./verify_recovered.sh"
 """
-    verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + f"""
+    if primitive:
+        gone = _check(v.checks.get("applied", {}), context, v.namespace, "mutation_gone", negate=True)
+        verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + "\n" + "\n".join([
+            gone,
+            f"""ready=$({kube} get {ref} -o jsonpath='{{.status.readyReplicas}}' 2>/dev/null || true)""",
+            f"""if [ -z "$ready" ] || [ "$ready" -lt 1 ]; then echo "spec_restored=False pods=not-ready";"""
+            f""" echo "FAIL {ref} has no Ready replica"; exit 1; fi""",
+            'echo "spec_restored=True pods=ready"', f'echo "CLEAN {v.id}"', ""])
+    else:
+        verify = _preamble(v, "verify_recovered", "prove the cluster is clean again") + f"""
 python3 _lib.py assert-recovered
 echo "CLEAN {v.id}"
 """
@@ -606,7 +693,9 @@ echo "CLEAN {v.id}"
     spec = {
         "variant_id": v.id, "context": context, "namespace": v.namespace,
         "kind": ref.split("/")[0], "name": ref.split("/")[1], "container": v.container,
-        "op": op, "params": v.params, "trigger": t, "symptom_class": v.symptom_class,
+        "op": op, "params": v.params, "trigger": t, "invoke": v.invoke,
+        "primitive": v.primitive, "engine": v.engine, "checks": v.checks,
+        "symptom_class": v.symptom_class,
         "root_cause": v.root_cause, "template_id": v.template_id, "category": v.category,
         "fault_level": v.fault_level,
     }

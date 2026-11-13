@@ -39,6 +39,9 @@ NAMESPACE_SAFE = {
     "valkey_auth_disruption",
     "valkey_memory_disruption",
     "incorrect_image",
+    # Patches the `rpc` ConfigMap and rollout-restarts the deployments labelled for it, all
+    # inside the target namespace.
+    "rpc_timeout_retries_misconfiguration",
 }
 
 # Why each refused primitive is refused, so the message names the blast radius.
@@ -113,10 +116,10 @@ def call(injector, action: str, primitive: str, workload: str, params: dict) -> 
             bound[name] = [workload]
         elif name == "namespace":
             bound[name] = injector.namespace
-        elif i == 0:
-            bound[name] = workload
         elif name in params:
             bound[name] = params[name]
+        elif i == 0:
+            bound[name] = workload
         elif p.default is inspect.Parameter.empty:
             sys.exit(f"FAIL {action}_{primitive} needs {name!r}; pass --param {name}=<value>")
     return method(**bound)

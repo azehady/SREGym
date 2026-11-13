@@ -32,7 +32,11 @@ def step_timeout(spec: dict) -> int:
     # The deliberate waits are not the whole cost: simulate.sh also waits on two rollouts at
     # up to 180s each, which is what made the first run die mid-protocol at 810s.
     waits = 2 * int(t.get("settle", 0)) + int(t.get("hold", 0)) + int(t.get("window", 0))
-    return STEP_TIMEOUT + waits + 2 * 180
+    # A primitive predisposition can sit in its own "wait for every pod Ready" post-condition
+    # for 600s before giving up, which is exactly what happens when the predisposition alone
+    # broke the app. Budget for it, so that case is reported as starvation instead of a timeout.
+    primitive_wait = 600 if spec.get("engine") == "sregym" else 0
+    return STEP_TIMEOUT + waits + 2 * 180 + primitive_wait
 
 
 def _run(bundle: pathlib.Path, script: str, log, timeout: int = STEP_TIMEOUT) -> tuple[int, str]:

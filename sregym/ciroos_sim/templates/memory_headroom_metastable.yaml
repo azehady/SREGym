@@ -6,6 +6,7 @@ fault_level: App
 primitive: resource_limit
 symptom_class: metastable-restart-loop
 requires:
+  app: astronomy-shop   # its trigger scales a load generator that only this app has
   has_resources: true
 mutation:
   op: squeeze_memory_limit
