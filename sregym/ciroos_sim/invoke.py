@@ -61,6 +61,11 @@ HOST_LEVEL = {
     "getaddrinfo_fail": "the node-local resolver path fails for every lookup",
 }
 
+# The demo's own app-level faults, flipped in the flagd ConfigMap. Listed apart from the
+# others because the injector takes a FLAG name rather than a workload, and because flagd
+# re-reads its mounted file, so a flag can change without restarting the service that reads it.
+FEATURE_FLAG = "feature_flag"
+
 NS_PREFIX = os.environ.get("CIROOS_SIM_NS_PREFIX", "orca-bench-")
 KHAOS_NS = os.environ.get("CIROOS_SIM_KHAOS_NS", "khaos")
 
@@ -170,6 +175,27 @@ def call_host_level(action: str, primitive: str, namespace: str, workload: str, 
     (injector.inject if action == "inject" else injector.recover)(pods, primitive)
 
 
+def call_feature_flag(action: str, namespace: str, context: str, params: dict) -> None:
+    """Flip one flagd flag, optionally leaving every consumer running.
+
+    Keeping the consumer alive is the whole point for a metastable fault: restarting it throws
+    away the warm state the baseline was measured on, so the fault could never outlive its own
+    trigger.
+    """
+    from sregym.generators.fault.inject_otel import OtelFaultInjector
+
+    flag = params.get("flag")
+    if not flag:
+        sys.exit("FAIL feature_flag needs --param flag=<flagName>")
+    pin_context(context)
+    injector = OtelFaultInjector(namespace,
+                                 restart_consumers=params.get("restart", "true") != "false")
+    if action == "inject":
+        injector.inject_fault(flag, variant=params.get("variant"))
+    else:
+        injector.recover_fault(flag)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ciroos-sim-invoke")
     ap.add_argument("action", choices=["inject", "recover", "list"])
@@ -182,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.action == "list":
+        print(f"{FEATURE_FLAG:32s} flag     flips one flagd flag; --param flag=<name> "
+              f"[--param variant=<v>] [--param restart=false]")
         for name, why in sorted(HOST_LEVEL.items()):
             print(f"{name:32s} host     {why}")
         for name in sorted(NAMESPACE_SAFE):
@@ -195,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit("FAIL --primitive and --namespace are required")
     if not args.namespace.startswith(NS_PREFIX):
         sys.exit(f"FAIL namespace {args.namespace!r} is outside {NS_PREFIX!r}; refusing to inject")
+    if args.primitive == FEATURE_FLAG:
+        call_feature_flag(args.action, args.namespace, args.context,
+                          dict(kv.partition("=")[::2] for kv in args.param))
+        print(f"{args.action}ed feature flag on {args.namespace} (flagd, context={args.context})")
+        return 0
     if args.primitive in HOST_LEVEL:
         call_host_level(args.action, args.primitive, args.namespace, args.workload, args.context)
         print(f"{args.action}ed {args.primitive} on {args.workload} (khaos, context={args.context})")

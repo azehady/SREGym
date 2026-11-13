@@ -120,6 +120,7 @@ def squeeze_patch(c, base):
 def baseline():
     """Record the workload's state with the predisposition applied but the spike not yet run."""
     facts = pod_facts()
+    facts["memory_mi"] = working_set_mi()
     json.dump(facts, open("baseline.json", "w"))
     print(f"baseline={facts}")
 
@@ -136,6 +137,20 @@ def metastable(window):
         return False, "no baseline.json; simulate.sh never recorded the pre-spike state"
     if base.get("ready", 0) < 1:
         return False, f"predisposition alone already broke it ({base}): starvation, not metastable"
+    # Some loops show up as restarts; a leak or a backlog shows up as a number that keeps
+    # climbing while the load is back to base. The template says which to watch.
+    sustain = TRIGGER.get("sustain") or {}
+    if sustain.get("metric") == "memory":
+        need = int(sustain.get("grows_by", 1))
+        first = working_set_mi()
+        time.sleep(window)
+        second = working_set_mi()
+        if second - first >= need:
+            return True, (f"memory {first}->{second} MiB over {window}s with the spike over "
+                          f"(baseline {base.get('memory_mi')} MiB)")
+        return False, (f"memory {first}->{second} MiB over {window}s, short of +{need}; "
+                       f"not still climbing once the spike stopped")
+
     first = pod_facts()
     time.sleep(window)
     second = pod_facts()
@@ -199,6 +214,10 @@ def build_patch():
 
 def applied():
     """True when the live spec actually carries the mutation."""
+    # A primitive-driven fault edits something other than this container spec, so the bundle's
+    # declarative check is the authority and there is nothing to confirm here.
+    if not OP:
+        return True
     obj = live()
     c = obj["spec"]["template"]["spec"]["containers"][container_index(obj)]
     key, bad = PARAMS.get("env_key", ""), PARAMS.get("bad_value", "")
