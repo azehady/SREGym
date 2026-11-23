@@ -48,6 +48,8 @@ PORT = int(os.environ.get("EVAL_ANALYSIS_PORT", "8096"))
 LITELLM = os.environ.get("EVAL_CHAT_LITELLM", "http://litellm.ciroos.svc.cluster.local:4000")
 CHAT_MODEL = os.environ.get("EVAL_CHAT_MODEL", "anthropic/claude-sonnet-4.6")
 LITELLM_KEY = os.environ.get("EVAL_CHAT_LITELLM_KEY", "")
+BIND = os.environ.get("EVAL_ANALYSIS_BIND", "127.0.0.1")
+ALLOW_TUNNEL = os.environ.get("EVAL_ANALYSIS_ALLOW_TUNNEL", "").lower() in ("1", "true", "yes")
 
 # The tools the chat agent may call. Each maps to an analyzer function; args are validated here
 # so a hallucinated case id returns an empty result rather than an error the model loops on.
@@ -251,10 +253,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def guard(self):
         host = (self.headers.get("Host") or "").split(":")[0]
-        if host not in {"localhost", "127.0.0.1"}:
-            self.reply(403, {"error": "Local access only"})
-            return False
-        return True
+        if host in {"localhost", "127.0.0.1"}:
+            return True
+        # Read-only analysis over an internal tailnet; opt in to the eval-workspace tunnel hosts.
+        if ALLOW_TUNNEL and (host.endswith(".ts.net") or host.endswith(".ciroos.local")
+                             or host == "gke.eval.ciroos.local" or not host):
+            return True
+        self.reply(403, {"error": "Local access only"})
+        return False
 
     def do_GET(self):
         if not self.guard():
@@ -329,4 +335,4 @@ if __name__ == "__main__":
           f"{len(cases)} contrastable cases, "
           f"{sum(c['has_ground_truth'] for c in cases)} with ground truth, "
           f"chat={CHAT_MODEL}", file=sys.stderr)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
