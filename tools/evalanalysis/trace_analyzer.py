@@ -23,6 +23,8 @@ from dataclasses import dataclass, field, asdict
 AGENTOPS = os.environ.get("CIROOS_AGENTOPS_BASE", "https://prod0.ciroos.ai/api/v1/agentops")
 PROJECT = os.environ.get("CIROOS_AGENTOPS_PROJECT", "1190")
 KEY_FILE = os.path.expanduser(os.environ.get("CIROOS_PROD0_KEY", "~/.config/ciroos/prod0-key"))
+# evals_gke agentops ClickHouse (no auth); the weakness-case traces live here, not prod0.
+CLICKHOUSE = os.environ.get("CIROOS_AGENTOPS_CLICKHOUSE", "http://34.118.231.230:8123")
 
 # A board line: "- [status] [id] text (★★☆☆☆)". Stars are optional.
 _HYP = re.compile(
@@ -50,6 +52,46 @@ def fetch_trace(investigation_id: str) -> dict:
     with urllib.request.urlopen(req, timeout=120) as r:
         doc = json.loads(r.read())
     return doc.get("data", doc)
+
+
+def fetch_trace_clickhouse(investigation_id: str) -> dict:
+    """Reconstruct the trace from evals_gke agentops ClickHouse, where kind-plane eval runs land.
+
+    agent_tool_calls is empty on this cluster, so the reads are in each span's `response`; the
+    flat span rows are folded into the same {spans:[{agent_name, llm_interactions}]} shape the
+    prod0 API returns, so one analyzer path serves both sources.
+    """
+    import urllib.parse
+    tid = investigation_id if ":" in investigation_id else f"{investigation_id}:v1"
+    sql = ("SELECT agent_name, request_prompt, response, model, timestamp, execution_time "
+           f"FROM agentops.agent_session_spans WHERE trace_id='{tid}' ORDER BY timestamp "
+           "FORMAT JSONEachRow")
+    url = f"{CLICKHOUSE}/?query=" + urllib.parse.quote(sql)
+    raw = urllib.request.urlopen(url, timeout=60).read().decode()
+    spans = []
+    for line in raw.strip().split("\n"):
+        if not line:
+            continue
+        r = json.loads(line)
+        spans.append({
+            "agent_name": r.get("agent_name"),
+            "llm_interactions": [{"request_prompt": r.get("request_prompt"),
+                                  "response": r.get("response"), "model": r.get("model"),
+                                  "timestamp": r.get("timestamp"), "total_tokens": 0}],
+            "total_tokens": 0, "children": [],
+        })
+    return {"spans": spans, "total_tokens": 0, "total_duration_ms": 0}
+
+
+def fetch_any(investigation_id: str) -> tuple[dict, str]:
+    """Try prod0 first; fall back to the evals_gke ClickHouse for kind-plane runs."""
+    try:
+        t = fetch_trace(investigation_id)
+        if list(_walk(t.get("spans") or [])):
+            return t, "prod0"
+    except Exception:
+        pass
+    return fetch_trace_clickhouse(investigation_id), "clickhouse"
 
 
 def _walk(spans):
@@ -99,6 +141,8 @@ class TraceView:
     # the thinking-sequence verdict, set when ground truth is known:
     outcome: str = ""                 # SOLVED | REJECTED_TRUTH | NEVER_HYPOTHESIZED | WRONG_CONCLUSION | UNKNOWN_NO_GT
     gt_terms: list[str] = field(default_factory=list)
+    reads: list[dict] = field(default_factory=list)   # the reading chain (ordered agent reads)
+    source: str = ""                  # prod0 | clickhouse
 
 
 def _gt_match(text: str, terms: list[str]) -> bool:
@@ -212,8 +256,56 @@ def _outcome(hyps: list[Hypothesis], summary: str, terms: list[str]) -> str:
     return "UNRESOLVED"
 
 
+# Normalize a tool call to a comparable "read": verb + resource kind, dropping the instance
+# name, namespace and flags, so the same read in two runs compares equal.
+_KUBECTL = re.compile(r"\b(get|describe|logs|top|exec)\b\s+([a-z.]+)", re.I)
+
+
+def normalize_read(agent: str, tool: str, args: dict) -> str:
+    cmd = args.get("cmd") or ""
+    if cmd:
+        m = _KUBECTL.search(cmd)
+        if m:
+            kind = m.group(2).split("/")[0].rstrip("s") or m.group(2)
+            return f"{m.group(1).lower()} {kind}"
+        return cmd.split()[0] if cmd.split() else tool
+    if "pod_name" in args or args.get("tail_lines"):
+        return "logs pod"
+    if "query" in args:
+        return "melt query"
+    if args.get("kinds") or args.get("resources"):
+        return "get multi"
+    return tool
+
+
+def reading_chain(trace: dict) -> list[dict]:
+    """The ordered reads the investigating agents issued: the evidence-gathering path."""
+    out: list[dict] = []
+    for s in _walk(trace.get("spans") or []):
+        ag = s.get("agent_name")
+        if ag not in ("K8sAgent", "MELTAgent"):
+            continue
+        for li in (s.get("llm_interactions") or []):
+            for ch in _safe(li.get("response") or ""):
+                for tc in (ch.get("message", {}).get("tool_calls") or []):
+                    tool = tc["function"]["name"]
+                    try:
+                        args = json.loads(tc["function"].get("arguments") or "{}")
+                    except ValueError:
+                        args = {}
+                    target = args.get("cmd") or args.get("query") or args.get("pod_name") or ""
+                    out.append({"agent": ag, "tool": tool,
+                                "read": normalize_read(ag, tool, args),
+                                "target": str(target)[:160]})
+    return out
+
+
 def analyze_investigation(investigation_id: str, gt_terms: list[str] | None = None) -> TraceView:
-    return analyze(fetch_trace(investigation_id), investigation_id, gt_terms)
+    trace, source = fetch_any(investigation_id)
+    v = analyze(trace, investigation_id, gt_terms)
+    v.reads = reading_chain(trace)
+    v.source = source
+    return v
 
 
 def as_dict(v: TraceView) -> dict:
