@@ -24,6 +24,24 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evalanalysis import analyzer as A  # noqa: E402
+from evalanalysis import trace_analyzer as T  # noqa: E402
+
+
+def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
+    """Ground-truth terms for a trace: an explicit override, else the case's curated terms
+    found by looking the investigation up in the local eval DB."""
+    if override:
+        return [t.strip() for t in override.split(",") if t.strip()], ""
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
+        row = c.execute("select case_id from eval_runs where investigation_id=? limit 1",
+                        (inv,)).fetchone()
+        if row and row[0] in A.GROUND_TRUTH:
+            return A.GROUND_TRUTH[row[0]]["terms"], row[0]
+        return [], (row[0] if row else "")
+    except Exception:
+        return [], ""
 
 PORT = int(os.environ.get("EVAL_ANALYSIS_PORT", "8096"))
 # The old keyless litellm, same path the fault chat uses; model is overridable per deploy.
@@ -89,6 +107,97 @@ SYSTEM = (
     "numbers the tools return. Note when metrics were unavailable (Prometheus was down through "
     "2026-11-23), since cloud-management cases depend on them."
 )
+
+DASHBOARD_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RCA Trace Analysis</title>
+<style>
+ :root{--bg:#14171b;--panel:#1c2026;--line:#2a2f37;--ink:#e8e6e0;--mut:#9aa0a8;--faint:#6b7179;
+  --green:#4bb972;--red:#e0574f;--amber:#d99a4e;--blue:#6ea8d8;--mono:ui-monospace,Menlo,Consolas,monospace}
+ *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+ .wrap{max-width:1000px;margin:0 auto;padding:22px 20px 80px}
+ h1{font-size:1.3rem;margin:0 0 4px}.sub{color:var(--mut);font-size:.85rem;margin-bottom:18px}
+ .bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+ input{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:6px;
+  padding:9px 11px;font:14px var(--mono)}
+ input#inv{flex:1;min-width:180px}input#gt{flex:2;min-width:160px}
+ button{background:var(--blue);color:#0b0e11;border:0;border-radius:6px;padding:9px 16px;font-weight:600;cursor:pointer}
+ button:disabled{opacity:.5;cursor:wait}
+ .meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--mut);font-size:.82rem;font-family:var(--mono);margin:6px 0 18px}
+ .badge{display:inline-block;padding:3px 11px;border-radius:20px;font-size:.78rem;font-weight:700;letter-spacing:.03em}
+ .SOLVED{background:#173a27;color:var(--green)}.REJECTED_TRUTH{background:#3a1a17;color:var(--red)}
+ .NEVER_HYPOTHESIZED{background:#30181f;color:#e07a9a}.WRONG_CONCLUSION{background:#3a2c14;color:var(--amber)}
+ .UNRESOLVED,.UNKNOWN_NO_GT{background:#23272e;color:var(--mut)}
+ .sect{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint);margin:26px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+ .hyp{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);
+  border-radius:7px;padding:12px 14px;margin-bottom:10px}
+ .hyp.gt-conf{border-left-color:var(--green)}.hyp.gt-rej{border-left-color:var(--red)}
+ .hyp.conf{border-left-color:var(--amber)}
+ .hrow{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+ .hid{font-family:var(--mono);font-size:.75rem;color:var(--faint)}
+ .traj{display:flex;gap:4px;align-items:center;font-family:var(--mono);font-size:.72rem}
+ .st{padding:2px 7px;border-radius:4px;background:#23272e;color:var(--mut)}
+ .st.confirmed{background:#173a27;color:var(--green)}.st.rejected,.st.refuted{background:#3a1a17;color:var(--red)}
+ .st.not_investigated{background:#23272e;color:var(--faint)}.st.investigating{background:#1c2b38;color:var(--blue)}
+ .arrow{color:var(--faint)}.tag{font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:4px}
+ .tag.truth{background:#173a27;color:var(--green)}.tag.distractor{background:#30181f;color:#e07a9a}
+ .htext{margin:7px 0 0;font-size:.92rem}.reason{margin:6px 0 0;font-size:.82rem;color:var(--mut);font-style:italic}
+ .stars{color:var(--amber);font-size:.8rem;letter-spacing:1px}
+ .summary{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:14px;
+  font-size:.88rem;color:var(--mut);white-space:pre-wrap;max-height:240px;overflow:auto}
+ .err{color:var(--red);font-family:var(--mono);font-size:.85rem}
+ .hint{color:var(--faint);font-size:.8rem}
+</style></head><body><div class="wrap">
+ <h1>RCA Trace Analysis</h1>
+ <div class="sub">Any investigation &rarr; failure taxonomy + hypothesis thinking-sequence (correct vs incorrect).</div>
+ <div class="bar">
+  <input id="inv" placeholder="INV-0000002349" value="INV-0000002349">
+  <input id="gt" placeholder="ground-truth terms (comma-sep), or leave blank for eval cases">
+  <button id="go" onclick="go()">Analyze</button>
+ </div>
+ <div id="out"><div class="hint">Enter an investigation id. Eval cases auto-load their ground truth; for others, type the GT component terms to get a correct/incorrect verdict.</div></div>
+</div>
+<script>
+const E=(h)=>{const d=document.createElement('div');d.innerHTML=h;return d.firstElementChild}
+async function go(){
+ const inv=document.getElementById('inv').value.trim(), gt=document.getElementById('gt').value.trim();
+ const out=document.getElementById('out'), btn=document.getElementById('go');
+ if(!inv)return; btn.disabled=true; out.innerHTML='<div class="hint">fetching trace&hellip; (large traces take ~10s)</div>';
+ try{
+  const r=await fetch(`/api/v1/evalanalysis/trace?investigation_id=${encodeURIComponent(inv)}`+(gt?`&gt=${encodeURIComponent(gt)}`:''));
+  const j=await r.json(); if(j.status!=='success')throw new Error(j.error||'failed');
+  render(j.data);
+ }catch(e){out.innerHTML=`<div class="err">${e.message}</div>`}
+ btn.disabled=false;
+}
+function render(d){
+ const dur=(d.duration_ms/1000/60).toFixed(1), tok=(d.total_tokens/1e6).toFixed(1);
+ const agents=Object.entries(d.agents||{}).map(([k,v])=>`${k}:${v}`).join('  ');
+ let h=`<div class="hrow" style="gap:12px"><h1 style="margin:0">${d.investigation_id}</h1>`+
+   `<span class="badge ${d.outcome}">${d.outcome.replace(/_/g,' ')}</span></div>`;
+ if(d.case_id)h+=`<div class="hint" style="margin-top:4px">case: <span style="font-family:var(--mono)">${d.case_id}</span>`+
+   (d.gt_terms&&d.gt_terms.length?` &middot; GT: ${d.gt_terms.join(', ')}`:' &middot; no ground truth (type terms for a verdict)')+`</div>`;
+ h+=`<div class="meta"><span>${d.rounds} orchestrator rounds</span><span>${d.hypotheses.length} hypotheses</span>`+
+   `<span>${dur} min</span><span>${tok}M tokens</span><span>${agents}</span></div>`;
+ h+=`<div class="sect">Hypothesis thinking-sequence</div>`;
+ for(const hy of d.hypotheses){
+  const conf=hy.status==='confirmed', rej=['rejected','refuted'].includes(hy.status);
+  let cls='hyp'; if(hy.is_ground_truth&&conf)cls+=' gt-conf'; else if(hy.is_ground_truth&&rej)cls+=' gt-rej'; else if(conf)cls+=' conf';
+  const traj=hy.status_trajectory.map((s,i)=>(i?'<span class="arrow">&rarr;</span>':'')+`<span class="st ${s}">${s}</span>`).join('');
+  let tag=''; if(hy.is_ground_truth===true)tag='<span class="tag truth">GROUND TRUTH</span>';
+  else if(hy.is_ground_truth===false&&conf)tag='<span class="tag distractor">DISTRACTOR CONFIRMED</span>';
+  const stars=hy.peak_confidence?`<span class="stars">${'★'.repeat(hy.peak_confidence)}${'☆'.repeat(5-hy.peak_confidence)}</span>`:'';
+  h+=`<div class="${cls}"><div class="hrow"><span class="hid">[${hy.id}]</span><div class="traj">${traj}</div>${stars}${tag}</div>`+
+    `<div class="htext">${esc(hy.text)}</div>`+(hy.final_reason?`<div class="reason">&#8866; ${esc(hy.final_reason)}</div>`:'')+`</div>`;
+ }
+ if(d.final_summary){h+=`<div class="sect">Final root-cause summary</div><div class="summary">${esc(d.final_summary)}</div>`}
+ document.getElementById('out').innerHTML=h;
+}
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+</script></body></html>"""
 
 
 def run_chat(messages: list[dict], rounds: int = 5) -> dict:
@@ -171,7 +280,27 @@ class Handler(BaseHTTPRequestHandler):
                                      for r in A.load_runs(case)]})
         if path == "/api/v1/evalanalysis/compare":
             return self.ok(A.compare((q.get("run_a") or [""])[0], (q.get("run_b") or [""])[0]))
+        if path == "/api/v1/evalanalysis/trace":
+            inv = (q.get("investigation_id") or [""])[0].strip()
+            if not inv:
+                return self.reply(422, {"error": "investigation_id required"})
+            terms, case = _gt_for_investigation(inv, (q.get("gt") or [""])[0])
+            try:
+                view = T.analyze_investigation(inv, terms)
+            except Exception as e:
+                return self.reply(502, {"error": f"trace fetch/parse failed: {e}"})
+            return self.ok({"case_id": case, **T.as_dict(view)})
+        if path in ("", "/dashboard", "/api/v1/evalanalysis/dashboard"):
+            return self._page()
         self.reply(404, {"error": "Endpoint not found"})
+
+    def _page(self):
+        html = DASHBOARD_HTML.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html)))
+        self.end_headers()
+        self.wfile.write(html)
 
     def do_POST(self):
         if not self.guard():
