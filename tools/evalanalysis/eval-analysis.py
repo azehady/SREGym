@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evalanalysis import analyzer as A  # noqa: E402
 from evalanalysis import trace_analyzer as T  # noqa: E402
+from evalanalysis import findings as FD  # noqa: E402
 
 
 def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
@@ -151,9 +152,20 @@ DASHBOARD_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   font-size:.88rem;color:var(--mut);white-space:pre-wrap;max-height:240px;overflow:auto}
  .err{color:var(--red);font-family:var(--mono);font-size:.85rem}
  .hint{color:var(--faint);font-size:.8rem}
+ .ov{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:20px}
+ .ov .head{font-size:.92rem;color:var(--ink);margin-bottom:12px;line-height:1.5}
+ .ov .built{font-family:var(--mono);font-size:.68rem;color:var(--faint);float:right}
+ table.f{border-collapse:collapse;width:100%;font-size:.82rem;margin:6px 0 14px}
+ table.f th{font-family:var(--mono);font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
+ table.f td{padding:6px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+ table.f td.c{font-family:var(--mono);color:var(--mut)}
+ .pil{display:inline-block;font-family:var(--mono);font-size:.68rem;padding:1px 6px;border-radius:4px;margin:1px 3px 1px 0;background:#23272e;color:var(--mut)}
+ .pil.E{background:#30181f;color:#e07a9a}.pil.CD{background:#3a2c14;color:var(--amber)}.pil.NOT{background:#1c2b38;color:var(--blue)}
+ .ovh{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:16px 0 4px}
 </style></head><body><div class="wrap">
  <h1>RCA Trace Analysis</h1>
  <div class="sub">Any investigation &rarr; failure taxonomy + hypothesis thinking-sequence (correct vs incorrect).</div>
+ <div id="overview"></div>
  <div class="bar">
   <input id="inv" placeholder="INV-0000002349" value="INV-0000002349">
   <input id="gt" placeholder="ground-truth terms (comma-sep), or leave blank for eval cases">
@@ -198,6 +210,33 @@ function render(d){
  document.getElementById('out').innerHTML=h;
 }
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+const shortCase=(c)=>c.split('_').slice(0,2).join('_');
+function bucketPills(b){const m={E_DISTRACTOR_CAPTURE:'E',CD_NAMED_BUT_FAILED:'CD',NOT_NAMED:'NOT'};
+ return Object.entries(b||{}).map(([k,v])=>`<span class="pil ${m[k]||''}">${(m[k]||k)} ${v}</span>`).join('')}
+async function loadOverview(){
+ const el=document.getElementById('overview');
+ try{
+  const r=await fetch('/api/v1/evalanalysis/findings'); const j=await r.json();
+  const d=j.data||{}; const cases=d.cases||{};
+  if(!d.built_at){el.innerHTML='<div class="ov"><div class="hint">No cached findings yet. Run <span class="mono">python findings.py build</span>.</div></div>';return}
+  let taxRows='', chainRows='';
+  for(const [cid,v] of Object.entries(cases)){
+   const s=v.summary||{}; const rc=v.reading_chain||{};
+   taxRows+=`<tr><td class="c">${shortCase(cid)}</td><td>${s.passed}/${s.n}</td><td>${bucketPills(s.failure_buckets)}</td></tr>`;
+   const p=rc.pass||{},f=rc.fail||{};
+   chainRows+=`<tr><td class="c">${shortCase(cid)}</td><td>${p.reads}/${f.reads}</td><td>${p.distinct}/${f.distinct}</td>`+
+     `<td>${p.touched_gt_pct}% / <b>${f.touched_gt_pct}%</b></td></tr>`;
+  }
+  el.innerHTML=`<div class="ov"><span class="built">built ${d.built_at||'—'}</span>`+
+   `<div class="head">${esc(d.headline||'')}</div>`+
+   `<div class="ovh">Failure taxonomy &middot; per case (pass/total, failure buckets)</div>`+
+   `<table class="f"><tr><th>case</th><th>pass</th><th>fail buckets</th></tr>${taxRows}</table>`+
+   `<div class="ovh">Reading-chain contrast &middot; pass / fail (the losers read the GT just as much)</div>`+
+   `<table class="f"><tr><th>case</th><th>reads/run</th><th>distinct</th><th>touched GT (pass/fail)</th></tr>${chainRows}</table>`+
+   `<div class="hint">E = distractor confirmed &middot; CD = named GT but failed &middot; NOT = GT never named. Enter an investigation below to drill into one trace.</div></div>`;
+ }catch(e){el.innerHTML=`<div class="ov"><div class="err">findings: ${e.message}</div></div>`}
+}
+loadOverview();
 document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
 </script></body></html>"""
 
@@ -274,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
                             "chat_model": CHAT_MODEL})
         if path == "/api/v1/evalanalysis/cases":
             return self.ok({"cases": A.contrastable_cases()})
+        if path == "/api/v1/evalanalysis/findings":
+            return self.ok(FD.load())
         if path == "/api/v1/evalanalysis/case":
             case = (q.get("case_id") or [""])[0]
             return self.ok({"summary": A.case_summary(case),
@@ -296,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self.reply(502, {"error": f"trace fetch/parse failed: {e}"})
             return self.ok({"case_id": case, **T.as_dict(view)})
-        if path in ("", "/dashboard", "/api/v1/evalanalysis/dashboard"):
+        if path in ("", "/dashboard", "/eval-analysis", "/api/v1/evalanalysis",
+                    "/api/v1/evalanalysis/dashboard"):
             return self._page()
         self.reply(404, {"error": "Endpoint not found"})
 
