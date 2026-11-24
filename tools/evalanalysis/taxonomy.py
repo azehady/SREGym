@@ -57,6 +57,35 @@ GT_TERMS: dict[str, list[str]] = {
 }
 
 # Known environment/harness artifacts that capture investigations (bucket E).
+# One-line ground truth per case (component: mechanism), condensed from build_structured_root_cause.
+GT_DESC: dict[str, str] = {
+    "env_variable_shadowing_astronomy_shop": "deployment/frontend-proxy: the container defines FRONTEND_HOST twice; the later value `localhost` shadows the intended one, so the edge proxy routes to the wrong upstream while the pod stays Running and Ready.",
+    "trainticket_f22_sql_column_name_mismatch_error": "deployment/ts-contacts-service: SQL statements reference an incorrect column name, so queries fail at execution time.",
+    "cronjob_sidecar_blocks_completion_hotel_reservation": "CronJob/audit-log-archiver: its jobTemplate has a short-lived `archiver` container plus a long-running `fluent-bit-sidecar` regular container that never exits, so no Job ever completes and pods pile up every minute.",
+    "duplicate_pvc_mounts_social_network": "deployment/jaeger: scaled to multiple replicas that share one ReadWriteOnce PVC under required hostname anti-affinity, so only one replica can mount it and the other stays Pending.",
+    "duplicate_pvc_mounts_astronomy_shop": "A deployment scaled to multiple replicas sharing one ReadWriteOnce PVC under required anti-affinity; one replica stays Pending.",
+    "edge_request_filter_cpu_saturation": "deployment/frontend-proxy: a WAF request-filter rule update introduced the regex `^([a-zA-Z]+)*$`; long near-matching `waf` values cause catastrophic backtracking and CPU saturation.",
+    "finalizer_deadlock_controller_hotel_reservation": "ClusterRole of the cleanup controller was made read-only: the controller gets 403 patching ConfigMaps, cannot remove its finalizer, and the ConfigMap is stuck Terminating.",
+    "internal_traffic_policy_local_astronomy_shop": "service/recommendation has spec.internalTrafficPolicy: Local with a single replica, so callers on other nodes have connections silently dropped by kube-proxy.",
+    "kafka_poison_pill_hol_block": "kafka topic orders-fulfillment: a poison-pill record cannot be deserialized by consumer group orders-validator, which never commits the offset; lag grows while pods stay Ready.",
+    "mutating_webhook_resource_limits_social_network": "MutatingWebhookConfiguration/gatekeeper-mutating-webhook-configuration patches every new pod's memory request/limit to 16Mi; four look-alike webhooks are inert.",
+    "namespace_memory_limit": "resourcequota/memory-limit-quota requires memory declarations the workloads lack; recreating deployment/search is rejected with `must specify memory`.",
+    "network_policy_block": "NetworkPolicy deny-all-recommendation blocks all ingress and egress for the recommendation pods; dependent request paths fail while pods stay Running.",
+    "rolling_update_misconfigured_social_network": "deployment/custom-service: rollout strategy maxUnavailable=100% / maxSurge=0 with a hanging init container, so the update drains every old replica and sticks.",
+    "search_rate_retry_collapse_hotel_reservation": "search-to-rate RPC path: a burst fills rate's bounded queue; calls exceed their deadline and search retries them, so a timeout/retry/queue feedback loop sustains the overload after traffic normalizes.",
+    "secret_rotation_stale_env_credentials_astronomy_shop": "deployment/product-catalog: PostgreSQL credentials and the Secret were rotated, but the running pod keeps the connection string captured at startup and cannot reconnect.",
+    "service_dns_resolution_failure_social_network": "configmap/coredns (kube-system) contains an NXDOMAIN template for one service's cluster-local name, so lookups for that service fail.",
+    "service_wrong_pod_selection_hotel_reservation": "service/frontend: selector broadened to `service-route=frontend`, a label also on search pods; endpoints include a search pod that listens on 8082, not 5000.",
+    "unschedulable_incorrect_port_assignment": "deployment/checkout: PRODUCT_CATALOG_ADDR points at port 8082 instead of the right one, so checkout cannot reach product-catalog.",
+    "valkey_auth_disruption": "service/valkey-cart: Valkey was reconfigured at runtime to require a password (CONFIG SET requirepass) its clients lack; cart's connections are rejected with NOAUTH and cart cannot start.",
+    "postgres_lock_contention_product_catalog": "postgresql: one session holds an ACCESS EXCLUSIVE lock on catalog.products; every read queues behind it. Visible only in pg_locks / pg_stat_activity.",
+    "calico_route_reflector_label_drift_hotel_reservation": "BGPPeer/cluster-peer-policy selects the deprecated node-role.kubernetes.io/master label; no route reflector is selected, so cross-node routes stop propagating.",
+    "cumulative_admission_webhook_timeout_hotel_reservation": "A chain of mutating admission webhooks (failurePolicy: Ignore) whose summed timeouts exceed the apiserver's ~30s admission deadline, so pod creation times out.",
+    "wrong_dns_policy_social_network": "deployment/user-service: dnsPolicy None with external resolver 8.8.8.8, so cluster-internal names do not resolve.",
+    "wrong_dns_policy_hotel_reservation": "deployment/profile: dnsPolicy None with external resolver 8.8.8.8, so cluster-internal names do not resolve.",
+    "wrong_dns_policy_astronomy_shop": "A deployment with dnsPolicy None and external resolver 8.8.8.8, so cluster-internal names do not resolve.",
+}
+
 # Patterns require the artifact framed as a failure, not merely cited as a data source.
 ARTIFACTS: dict[str, str] = {
     "otel collector / DNS flood": r"otel.?collector.{0,80}(fail|error|dns|unreachable|crash|export)|dns (lookup )?flood",
@@ -181,7 +210,7 @@ BUCKETS = {
     "A": ("Evidence never gathered", "add the probe to the unconditional first-round sweep"),
     "B": ("Gathered, not surfaced", "evidence-extraction prompt / round-1 budget"),
     "C": ("Surfaced, mis-ranked", "ranking discipline (prompt levers failed here twice)"),
-    "D": ("Lost in the reporter", "reporter"),
+    "D": ("Confirmed, then dropped from the conclusion", "final selection / reporter"),
     "E": ("Distractor capture", "noise suppression / local-knowledge BP"),
     "F": ("Tool / capability failure", "tool fixes"),
     "G": ("BP misdirection", "BP selection"),
@@ -233,8 +262,8 @@ def classify(run, feat: dict | None, fault_type: str = "", summary: str = "", in
         p = "H"
     elif not funnel["outputs"]:
         p = "F" if "F" in res["flags"] else "G" if bp_mis else "A"
-    elif funnel["confirmed"] and not in_sum:
-        p = "D"
+    elif funnel["confirmed"] and (not in_sum or run.d1 < 0.5):
+        p = "D"                              # confirmed on the board, not blamed in the conclusion
     elif in_sum:
         p = "N" if run.d1 >= 0.5 else "C"   # mentioned, but the judge says not blamed as origin
     elif arts:

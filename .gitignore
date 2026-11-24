@@ -253,3 +253,4 @@ resolve-values.yaml
 tools/evalanalysis/findings_cache.json
 tools/evalanalysis/reads_cache.json
 tools/evalanalysis/features_cache.json
+tools/evalanalysis/timeline_cache/

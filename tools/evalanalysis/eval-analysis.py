@@ -27,6 +27,7 @@ from evalanalysis import analyzer as A  # noqa: E402
 from evalanalysis import trace_analyzer as T  # noqa: E402
 from evalanalysis import findings as FD  # noqa: E402
 from evalanalysis import taxonomy as X  # noqa: E402
+from evalanalysis import timeline as TL  # noqa: E402
 
 
 def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
@@ -47,7 +48,7 @@ def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]
 
 PORT = int(os.environ.get("EVAL_ANALYSIS_PORT", "8096"))
 # The old keyless litellm, same path the fault chat uses; model is overridable per deploy.
-LITELLM = os.environ.get("EVAL_CHAT_LITELLM", "http://litellm.ciroos.svc.cluster.local:4000")
+LITELLM = os.environ.get("EVAL_CHAT_LITELLM", "http://litellm-service.ciroos.svc.cluster.local")
 CHAT_MODEL = os.environ.get("EVAL_CHAT_MODEL", "anthropic/claude-sonnet-4.6")
 LITELLM_KEY = os.environ.get("EVAL_CHAT_LITELLM_KEY", "")
 BIND = os.environ.get("EVAL_ANALYSIS_BIND", "127.0.0.1")
@@ -66,7 +67,26 @@ TOOLS = {
         for r in A.load_runs(case_id, model)][:200],
 }
 
+TOOLS["round_detail"] = lambda investigation_id, round, **_: next(
+    (r for r in _inv_payload(investigation_id)["timeline"]["rounds"] if r["n"] == int(round)),
+    {"error": "no such round"})
+TOOLS["grep_trace"] = lambda investigation_id, pattern, **_: TL.grep(investigation_id, pattern)
+
 TOOL_SCHEMA = [
+    {"type": "function", "function": {
+        "name": "round_detail",
+        "description": "Full detail of one round of an investigation: tasks, every read with its "
+                       "target, agent findings, orchestrator notes, board changes.",
+        "parameters": {"type": "object", "properties": {
+            "investigation_id": {"type": "string"}, "round": {"type": "integer"}},
+            "required": ["investigation_id", "round"]}}},
+    {"type": "function", "function": {
+        "name": "grep_trace",
+        "description": "Regex-search the raw tool outputs of an investigation (kubectl / logs / "
+                       "metrics results). Use to check whether a fact was actually in the evidence.",
+        "parameters": {"type": "object", "properties": {
+            "investigation_id": {"type": "string"}, "pattern": {"type": "string"}},
+            "required": ["investigation_id", "pattern"]}}},
     {"type": "function", "function": {
         "name": "list_contrastable_cases",
         "description": "Cases that have both passing and failing runs, with counts. Start here.",
@@ -101,15 +121,17 @@ TOOL_SCHEMA = [
 ]
 
 SYSTEM = (
-    "You analyze Ciroos RCA evaluation runs. Answer only from the tools; never invent run ids, "
-    "scores, or case names. The eval measures whether the RCA agent's final summary localizes "
-    "(D1), characterizes (D2) and scopes (D3) the injected fault against a ground truth. When "
-    "asked why a case fails, call case_summary for the bucket split and "
-    "subquestion_discrimination for the missed fact, then say which harness layer the fix lives "
-    "in: NOT_NAMED -> evidence gathering or first-round sweep; E_DISTRACTOR_CAPTURE -> noise "
-    "suppression; CD_NAMED_BUT_FAILED -> ranking or the reporter. Be concrete and cite the "
-    "numbers the tools return. Note when metrics were unavailable (Prometheus was down through "
-    "2026-11-23), since cloud-management cases depend on them."
+    "You analyze Ciroos RCA evaluation runs. Every eval case has a KNOWN ground truth; use it. "
+    "Answer only from the tools and the supplied context; never invent run ids, scores, or case "
+    "names. The judge scores localization (D1), characterization (D2) and scope (D3). Failures are "
+    "classified by where the ground-truth fact drops out of the run: A never gathered, B gathered "
+    "but not reported by the agent, C surfaced but mis-ranked, D confirmed then dropped from the "
+    "conclusion, E distractor capture (environment artifact blamed), F tool failure, G BP "
+    "misdirection, H budget exhaustion, N named but judged incomplete. When asked why something "
+    "failed, name the layer, quote the run's own reasoning, and say which harness change addresses "
+    "it (first-round sweep, evidence extraction, completion gate, ranking, reporter, noise "
+    "suppression, tools). Be concrete and brief. Prometheus was down on the eval cluster through "
+    "2026-11-23, so metric reads before then return nothing."
 )
 
 DASHBOARD_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -261,7 +283,7 @@ def _row(r, full: bool = False) -> dict:
     return d
 
 
-_TAX: dict = {"mtime": None, "runs": {}}
+_TAX: dict = {"mtime": None, "runs": {}, "meta": {}, "by_inv": {}}
 
 
 def _tax() -> dict:
@@ -288,8 +310,56 @@ def _tax() -> dict:
         out[r.run_id] = X.classify(r, feats.get(r.investigation_id or ""),
                                    (types.get(r.case_id) or {}).get("type", ""),
                                    A._summary_text(rca), st or "COMPLETED")
-    _TAX.update(mtime=mt, runs=out)
+    by_inv = {r.investigation_id: r for r in sorted(A.load_runs(), key=lambda r: r.created_at)
+              if r.investigation_id}
+    _TAX.update(mtime=mt, runs=out, meta=meta, by_inv=by_inv)
     return out
+
+
+def _inv_payload(inv: str) -> dict:
+    """Everything the timeline / compare / chat views need for one investigation."""
+    _tax()
+    r = _TAX["by_inv"].get(inv)
+    case = r.case_id if r else ""
+    terms = X.GT_TERMS.get(case, [])
+    summary = A._summary_text(_TAX["meta"].get(r.run_id, (None,))[0]) if r else ""
+    tl = dict(TL.get(inv, terms, summary))
+    # Ground truth beats keywords: a summary that mentions the component but that the judge says
+    # does not blame it (D1 < 0.5) has NOT reached the summary milestone.
+    if r and not r.passed and r.d1 < 0.5 and tl["milestones"].get("summary"):
+        tl["milestones"] = {**tl["milestones"], "summary": None}
+        tl["summary_mentions_only"] = True
+    return {"case_id": case, "run": _row(r) if r else None,
+            "gt": {"terms": terms, "description": X.GT_DESC.get(case, "")},
+            "judge": r.failing_subquestions if r else [], "timeline": tl}
+
+
+def _partners(inv: str, n: int = 8) -> list[dict]:
+    """Same-case runs with the opposite outcome, same model first, then nearest in time."""
+    _tax()
+    r = _TAX["by_inv"].get(inv)
+    if not r:
+        return []
+    feats = X.load_cached()
+    c = [o for o in _TAX["by_inv"].values() if o.case_id == r.case_id and o.passed != r.passed
+         and feats.get(o.investigation_id, {}).get("rounds")]
+    from datetime import datetime as _dt
+    when = lambda x: _dt.fromisoformat(x.created_at[:19])
+    c.sort(key=lambda o: (o.model != r.model, abs((when(o) - when(r)).total_seconds())))
+    return [_row(o) for o in c[:n]]
+
+
+def _compare(a: str, b: str) -> dict:
+    pa, pb = _inv_payload(a), _inv_payload(b)
+    # the run that reached the ground truth is the reference, whichever order they came in
+    if pb["run"] and pb["run"]["passed"] and not (pa["run"] and pa["run"]["passed"]):
+        pa, pb = pb, pa
+    diff = TL.compare(pa["timeline"], pb["timeline"])
+    if pb["timeline"].get("summary_mentions_only"):
+        d1 = next((j for j in pb["judge"] if str(j.get("dim")) == "D1"), None)
+        diff["story"] += (" Its summary mentions the ground-truth component but does not blame it"
+                          + (f"; the judge: \"{str(d1.get('evidence'))[:260]}\"" if d1 else "."))
+    return {"ok": pa, "bad": pb, "diff": diff, "same_case": pa["case_id"] == pb["case_id"]}
 
 
 
@@ -318,8 +388,13 @@ def _taxonomy() -> dict:
     buckets: dict[str, list] = {}
     matrix: dict[str, dict] = {}
     recall: dict[str, list] = {}
+    models: dict[str, dict] = {}
     for r in A.load_runs():
         row = _row(r)
+        mm = models.setdefault(row["model"], {"pass": 0, "fail": 0})
+        mm["pass" if r.passed else "fail"] += 1
+        if not r.passed:
+            mm[row["tax"] or "?"] = mm.get(row["tax"] or "?", 0) + 1
         m = matrix.setdefault(r.case_id, {"pass": 0, "fail": 0})
         m["pass" if r.passed else "fail"] += 1
         if r.passed:   # null test: do passing summaries actually contain the GT terms?
@@ -343,14 +418,45 @@ def _taxonomy() -> dict:
                     for k, v in d.items() if v} for cid, d in sep.items()}
     return {"buckets": {k: sorted(v, key=lambda x: x["created_at"], reverse=True)
                         for k, v in buckets.items()},
-            "matrix": matrix, "defs": X.BUCKETS, "funnel": funnel,
+            "matrix": matrix, "defs": X.BUCKETS, "funnel": funnel, "models": models,
+            "gt": X.GT_DESC,
             "coverage": {"with_trace": sum(1 for t in _tax().values() if t.get("funnel")),
                          "runs": len(_tax())}}
 
 
-def run_chat(messages: list[dict], rounds: int = 5) -> dict:
+def _chat_context(invs: list[str]) -> str:
+    """Ground the chat in specific investigations: GT, taxonomy, judge misses, timeline digest."""
+    invs = [i for i in invs if i][:2]
+    if not invs:
+        return ""
+    ps = [_inv_payload(i) for i in invs]
+    out = ["\n\nYou are discussing specific investigation(s). The ground truth is KNOWN; use it. "
+           "Explain where the run's reasoning left the path to the ground truth, citing rounds, "
+           "reads, hypotheses and the orchestrator's own words. Use round_detail and grep_trace "
+           "to verify before claiming a fact was or was not in the evidence."]
+    for p in ps:
+        run = p["run"] or {}
+        out.append(f"\n=== {p['timeline']['investigation_id']} | case {p['case_id']} | "
+                   f"{'PASS' if run.get('passed') else 'FAIL'} score {run.get('composite')} | "
+                   f"model {run.get('model')} | taxonomy bucket {run.get('tax') or '-'} "
+                   f"({(X.BUCKETS.get(run.get('tax') or '', ('',))[0])})")
+        out.append(f"GROUND TRUTH: {p['gt']['description']} (terms: {', '.join(p['gt']['terms'])})")
+        if p["judge"]:
+            out.append("Judge sub-questions failed: " + " | ".join(
+                f"{j.get('question_id')}: {str(j.get('evidence'))[:200]}" for j in p["judge"][:6]))
+        out.append(TL.digest(p["timeline"], 9000 if len(ps) == 1 else 6500))
+    if len(ps) == 2:
+        d = _compare(invs[0], invs[1])["diff"]
+        out.append(f"\n=== COMPARISON (reference {d['ok']} vs {d['bad']}) ===\n{d['story']}\n"
+                   f"Milestones: " + "; ".join(
+                       f"{r['layer']}: ref={'R%s' % r['ok']['round'] if r['ok'] else 'never'} "
+                       f"other={'R%s' % r['bad']['round'] if r['bad'] else 'never'}" for r in d["rows"]))
+    return "\n".join(out)
+
+
+def run_chat(messages: list[dict], rounds: int = 6, invs: list[str] | None = None) -> dict:
     """Drive a short tool-use loop against litellm and return the final answer plus a trace."""
-    convo = [{"role": "system", "content": SYSTEM}, *messages]
+    convo = [{"role": "system", "content": SYSTEM + _chat_context(invs or [])}, *messages]
     trace: list[dict] = []
     headers = {"Content-Type": "application/json"}
     if LITELLM_KEY:
@@ -359,7 +465,7 @@ def run_chat(messages: list[dict], rounds: int = 5) -> dict:
         req = urllib.request.Request(
             f"{LITELLM}/v1/chat/completions",
             data=json.dumps({"model": CHAT_MODEL, "messages": convo,
-                             "tools": TOOL_SCHEMA, "temperature": 0}).encode(),
+                             "tools": TOOL_SCHEMA}).encode(),
             headers=headers)
         with urllib.request.urlopen(req, timeout=120) as resp:
             msg = json.loads(resp.read())["choices"][0]["message"]
@@ -434,6 +540,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
+        one = lambda k: (q.get(k) or [""])[0].strip()
+        try:
+            if path == "/api/v1/evalanalysis/timeline":
+                return self.ok(_inv_payload(one("investigation_id")))
+            if path == "/api/v1/evalanalysis/partners":
+                return self.ok({"partners": _partners(one("investigation_id"))})
+            if path == "/api/v1/evalanalysis/compare_traces":
+                return self.ok(_compare(one("a"), one("b")))
+        except Exception as e:
+            return self.reply(502, {"error": f"trace fetch/parse failed: {e}"})
         if path == "/api/v1/evalanalysis/case":
             case = (q.get("case_id") or [""])[0]
             return self.ok({"summary": A.case_summary(case),
@@ -488,7 +604,8 @@ class Handler(BaseHTTPRequestHandler):
             if not msgs:
                 return self.reply(422, {"error": "messages or prompt required"})
             try:
-                return self.ok(run_chat(msgs))
+                ctx = payload.get("context") or {}
+                return self.ok(run_chat(msgs, invs=ctx.get("investigation_ids") or []))
             except Exception as e:
                 return self.reply(502, {"error": f"chat failed: {e}"})
         self.reply(404, {"error": "Endpoint not found"})
