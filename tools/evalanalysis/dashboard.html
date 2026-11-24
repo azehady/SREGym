@@ -85,7 +85,8 @@
 <script>
 const API='/api/v1/evalanalysis', $=id=>document.getElementById(id);
 const esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const short=c=>c.split('_').slice(0,3).join('_');
+const APP={hotel_reservation:'hotel',social_network:'social',astronomy_shop:'astro'};
+const short=c=>{let a='';for(const [k,v] of Object.entries(APP))if(c.endsWith('_'+k)){a=' · '+v;c=c.slice(0,-k.length-1)}return c.split('_').slice(0,3).join('_')+a};
 const get=async p=>{const j=await (await fetch(API+p)).json(); if(j.status!=='success')throw new Error(j.error||'failed'); return j.data};
 function show(v){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
  document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id===v));

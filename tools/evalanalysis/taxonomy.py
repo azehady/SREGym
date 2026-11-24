@@ -204,7 +204,8 @@ def classify(run, feat: dict | None, fault_type: str = "", summary: str = "", in
     in_sum = bool(terms) and any(t in summary for t in terms)
     arts = _artifacts(summary)
     res = {"primary": "", "flags": [], "funnel": None, "artifacts": arts}
-    if feat is None or "error" in feat:
+    empty = feat is not None and not feat.get("tool_calls") and not feat.get("hyps") and not feat.get("rounds")
+    if feat is None or "error" in feat or empty:   # trace store returned nothing usable
         res["flags"].append("no_trace")
         res["primary"] = ("" if run.passed else ("N" if run.d1 >= 0.5 else "C") if in_sum
                           else "E" if arts else "?")
