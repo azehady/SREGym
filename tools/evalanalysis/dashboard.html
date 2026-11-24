@@ -30,9 +30,12 @@
  .bk{display:inline-block;min-width:22px;text-align:center;font:700 .72rem var(--mono);padding:2px 6px;border-radius:4px;background:#23272e;color:var(--mut)}
  .bk.A{background:#30181f;color:var(--pink)}.bk.B{background:#3a2c14;color:var(--amber)}.bk.C{background:#2b2140;color:#b49ce0}
  .bk.D{background:#1c2b38;color:var(--blue)}.bk.E{background:#3a1a17;color:var(--red)}.bk.F{background:#2a2f37;color:var(--ink)}
- .bk.G{background:#14312f;color:#5fc9bb}.bk.H{background:#33301a;color:#d6c95a}.bk.N{background:#173a27;color:var(--green)}
+ .bk.M{background:#2a2630;color:#c9b8d8}.bk.G{background:#14312f;color:#5fc9bb}.bk.H{background:#33301a;color:#d6c95a}.bk.N{background:#173a27;color:var(--green)}
  .xl{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:5px;font:600 .68rem inherit;color:var(--mut);vertical-align:middle;white-space:nowrap}
  .xl:hover{color:var(--ink);border-color:var(--faint);text-decoration:none}.xl svg{width:12px;height:12px}.xl.off{opacity:.35;cursor:default}
+ .idc{display:flex;flex-direction:column;gap:1px}.idc .top{display:flex;align-items:center}
+ .plane{font:600 .6rem var(--mono);letter-spacing:.06em;color:var(--faint);text-transform:uppercase}.plane.prod0{color:var(--amber)}
+ .pil.nogt{background:#23272e;color:var(--mut)}
  .flag{font:.62rem var(--mono);color:var(--faint);margin-left:4px}
  .stats{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:6px}.stat b{display:block;font-size:1.5rem;font-variant-numeric:tabular-nums}.stat span{color:var(--mut);font-size:.78rem}
  .tbar{display:flex;gap:2px;margin:8px 0 12px}.tbar button{border:0;padding:0;cursor:pointer;min-width:26px;background:none}.tbar .bk{display:block;border-radius:0;padding:7px 4px}
@@ -89,8 +92,9 @@
   <div class="bar">
    <select id="fcase"><option value="">all cases</option></select>
    <select id="fmodel"><option value="">all models</option></select>
-   <select id="fout"><option value="">pass + fail</option><option value="fail">fail</option><option value="pass">pass</option></select>
-   <select id="ftax"><option value="">any taxonomy</option><option value="A">A never gathered</option><option value="B">B not reported</option><option value="C">C mis-ranked</option><option value="D">D confirmed, dropped</option><option value="E">E distractor</option><option value="F">F tool failure</option><option value="G">G BP misdirection</option><option value="H">H budget</option><option value="N">N named, incomplete</option></select>
+   <select id="fout"><option value="">all outcomes</option><option value="fail">fail</option><option value="pass">pass</option><option value="nogt">no ground truth</option></select>
+   <select id="fplane"><option value="">both clusters</option><option value="evals">evals_gke</option><option value="prod0">prod0</option></select>
+   <select id="ftax"><option value="">any taxonomy</option><option value="A">A never gathered</option><option value="B">B not reported</option><option value="C">C mis-ranked</option><option value="D">D confirmed, dropped</option><option value="E">E distractor</option><option value="F">F tool failure</option><option value="G">G BP misdirection</option><option value="H">H budget</option><option value="N">N named, incomplete</option><option value="M">M miscellaneous</option></select>
    <span id="hcount" class="hint"></span>
    <a style="margin-left:auto;font-size:.8rem" href="/api/v1/evalanalysis/export">export JSONL (training records)</a>
   </div>
@@ -108,7 +112,7 @@
  </div>
  <div id="trace" class="view">
   <div class="bar">
-   <input id="inv" placeholder="INV-0000002351" style="flex:1;min-width:180px">
+   <input id="inv" placeholder="prod0:INV-0000002351 or evals:INV-0000001974" style="flex:1;min-width:180px">
    <button class="go" id="go">Open</button>
   </div>
   <div id="out"><div class="hint">Pick a row in History or Failure taxonomy, or enter an investigation id.</div></div>
@@ -127,11 +131,11 @@ const esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt
 const APP={hotel_reservation:'hotel',social_network:'social',astronomy_shop:'astro'};
 const short=c=>{c=c||'';let a='';for(const [k,v] of Object.entries(APP))if(c.endsWith('_'+k)){a=' · '+v;c=c.slice(0,-k.length-1)}return c.split('_').slice(0,3).join('_')+a};
 const get=async p=>{const j=await (await fetch(API+p)).json(); if(j.status!=='success')throw new Error(j.error||'failed'); return j.data};
-const TAXN={A:'Evidence never gathered',B:'Gathered, not reported',C:'Surfaced, mis-ranked',D:'Confirmed, then dropped',E:'Distractor capture',F:'Tool / capability failure',G:'BP misdirection',H:'Budget exhaustion',N:'Named, judged incomplete','?':'No trace yet'};
-const ORDER=['A','B','C','D','E','F','G','H','N','?'], LAYERS=['outputs','ledger','hypothesis','confirmed','summary'];
+const TAXN={A:'Evidence never gathered',B:'Gathered, not reported',C:'Surfaced, mis-ranked',D:'Confirmed, then dropped',E:'Distractor capture',F:'Tool / capability failure',G:'BP misdirection',H:'Budget exhaustion',N:'Named, judged incomplete',M:'Miscellaneous','?':'No trace yet'};
+const ORDER=['A','B','C','D','E','F','G','H','N','M','?'], LAYERS=['outputs','ledger','hypothesis','confirmed','summary'];
 const LOSS={outputs:'gathering (never in a tool output)',ledger:'the agent report',hypothesis:'hypothesis generation',confirmed:'confirmation',summary:'the final conclusion'};
 const PATH=[['output','a tool output contains it'],['finding','an agent reports it'],['note','the orchestrator writes it down'],['hypothesis','a hypothesis names it'],['confirmed','that hypothesis is confirmed'],['summary','the conclusion blames it']];
-const strip=f=>f?`<span title="tool outputs → agent findings → hypothesis → confirmed → summary">${LAYERS.map(k=>`<span style="color:${f[k]?'var(--green)':'var(--red)'}">${f[k]?'●':'○'}</span>`).join('')}</span>`:'<span class="hint">no trace</span>';
+const strip=f=>f===undefined?'':f?`<span title="tool outputs → agent findings → hypothesis → confirmed → summary">${LAYERS.map(k=>`<span style="color:${f[k]?'var(--green)':'var(--red)'}">${f[k]?'●':'○'}</span>`).join('')}</span>`:'<span class="hint">no trace</span>';
 
 /* routing: the tab and its state live in the URL hash, so any view can be shared */
 function parse(){const [v,qs]=location.hash.slice(1).split('?'); return {v:v||'overview',p:Object.fromEntries(new URLSearchParams(qs||''))}}
@@ -155,12 +159,14 @@ function xlinks(l,labels){if(!l||!l.investigation)return ''; const stop='onclick
    :`<span class="xl off" title="${l.plane==='prod0'?'Investigated by prod0; its MLflow is not reachable from here':'No MLflow trace found for this investigation (older traces were purged)'}">${IC_ML}${labels?'MLflow':''}</span>`)}
 
 /* shared rows */
-const outcome=r=>`<span class="pil ${r.passed?'pass':'fail'}">${r.passed?'pass':'fail'}</span>`;
-function runRow(r){const inv=esc(r.investigation_id||'');
- return `<tr class="row" onclick="nav('trace',{inv:'${inv}'})"><td class="c">${inv||esc(r.run_id)}${xlinks(r.links)}</td>`+
- `<td class="c">${short(r.case_id)}</td><td>${esc(r.model)}</td><td>${outcome(r)}</td><td>${r.composite}</td><td>${r.d1} / ${r.d2} / ${r.d3}</td>`+
+const outcome=r=>r.scored===false?`<span class="pil nogt" title="${esc(r.kind||'')}">no GT</span>`:`<span class="pil ${r.passed?'pass':'fail'}">${r.passed?'pass':'fail'}</span>`;
+const idcell=(r,labels)=>`<div class="idc"><div class="top">${esc(r.investigation_id||r.run_id)}${xlinks(r.links,labels)}</div><span class="plane ${esc(r.plane||'')}">${esc(r.plane_label||'')}</span></div>`;
+function runRow(r){const ref=esc(r.ref||'');
+ const caseTd=r.scored===false?`<td class="w hint" style="min-width:180px">${esc(r.kind)}: ${clip(r.summary,60)}</td>`:`<td class="c">${short(r.case_id)}</td>`;
+ return `<tr class="row" onclick="nav('trace',{ref:'${ref}'})"><td class="c">${idcell(r)}</td>`+
+ `${caseTd}<td>${esc(r.model)}</td><td>${outcome(r)}</td><td>${r.composite??''}</td><td>${r.scored===false?'':`${r.d1} / ${r.d2} / ${r.d3}`}</td>`+
  `<td>${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax]||'')}">${r.tax}</span>`:''}${(r.flags||[]).filter(f=>f!==r.tax).map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</td><td>${strip(r.funnel)}</td>`+
- `<td>${!r.passed&&r.funnel?`<a href="#compare?b=${inv}" onclick="event.stopPropagation()">vs a pass</a>`:''}</td><td class="c">${esc(r.created_at)}</td></tr>`}
+ `<td>${r.scored!==false&&!r.passed&&r.funnel?`<a href="#compare?b=${ref}" onclick="event.stopPropagation()">vs a pass</a>`:''}</td><td class="c">${esc(r.created_at)}</td></tr>`}
 const RUNHEAD='<tr><th>investigation</th><th>case</th><th>model</th><th>result</th><th>score</th><th>D1 / D2 / D3</th><th>A–H</th><th>funnel</th><th></th><th>when</th></tr>';
 
 /* data shared by Overview and Failure taxonomy */
@@ -182,7 +188,9 @@ VIEWS.overview=async()=>{const el=$('overview'); if(el.dataset.done)return;
   const models=Object.entries(d.models).filter(([,m])=>m.pass+m.fail>=5).sort((x,y)=>(y[1].pass+y[1].fail)-(x[1].pass+x[1].fail)).map(([k,m])=>{const n=m.pass+m.fail;
    return `<tr class="row" onclick="nav('history',{model:'${esc(k)}'})"><td>${esc(k)}</td><td><span class="mini"><i style="width:${100*m.pass/n}%"></i></span>${m.pass}/${n}</td><td>${ORDER.filter(b=>m[b]).map(b=>`<span class="bk ${b}">${b} ${m[b]}</span>`).join(' ')}</td></tr>`}).join('');
   el.innerHTML=`<div class="ov"><div class="stats"><div class="stat"><b>${total}</b><span>scored investigations</span></div><div class="stat"><b>${Math.round(100*pass/total)}%</b><span>reached the ground truth</span></div>`+
-   `<div class="stat"><b>${fails}</b><span>failed</span></div><div class="stat"><b>${d.coverage.with_trace}</b><span>with an extracted trace</span></div></div>`+
+   `<div class="stat"><b>${fails}</b><span>failed</span></div><div class="stat"><b>${d.coverage.with_trace}</b><span>with an extracted trace</span></div>`+
+   `<div class="stat"><b>${d.coverage.planes.evals} / ${d.coverage.planes.prod0}</b><span>evals_gke / prod0 runs</span></div>`+
+   `<div class="stat"><a href="#history?out=nogt"><b>${d.coverage.unscored}</b></a><span>prod0 investigations without ground truth</span></div></div>`+
    `<div class="ovh">Where the ${fails} failing runs left the ground truth — click a bucket for its investigations</div><div class="tbar">${bar}</div><div class="legend">${leg}</div></div>`+
    `<div class="ov"><div class="ovh">Cases that fail most</div><div class="hint">"Loses the fact at" is the first layer where passing runs carry the ground-truth fact and failing runs don't (a gap of 30 points or more).</div>`+
    `<div class="scroll"><table class="f"><tr><th>case and its ground truth</th><th>passed</th><th>main buckets</th><th>loses the fact at</th><th></th></tr>${cases}</table></div></div>`+
@@ -193,11 +201,12 @@ VIEWS.overview=async()=>{const el=$('overview'); if(el.dataset.done)return;
 let allRuns=null; const runs=async()=>allRuns||(allRuns=(await get('/history')).runs);
 VIEWS.history=async p=>{const R=await runs(); if(!$('fcase').dataset.done){
   const fill=(id,vals)=>{$(id).innerHTML+=[...new Set(vals)].sort().map(v=>`<option value="${esc(v)}">${esc(id==='fcase'?short(v):v)}</option>`).join('')};
-  fill('fcase',R.map(r=>r.case_id)); fill('fmodel',R.map(r=>r.model)); $('fcase').dataset.done=1}
- $('fcase').value=p.case||''; $('fmodel').value=p.model||''; $('fout').value=p.out||''; $('ftax').value=p.tax||'';
- const rows=R.filter(r=>(!p.case||r.case_id===p.case)&&(!p.model||r.model===p.model)&&(!p.tax||r.tax===p.tax)&&(!p.out||(p.out==='pass')===r.passed));
+  fill('fcase',R.map(r=>r.case_id).filter(Boolean)); fill('fmodel',R.map(r=>r.model)); $('fcase').dataset.done=1}
+ $('fcase').value=p.case||''; $('fmodel').value=p.model||''; $('fout').value=p.out||''; $('ftax').value=p.tax||''; $('fplane').value=p.plane||'';
+ const outOk=r=>!p.out||(p.out==='nogt'?r.scored===false:r.scored!==false&&(p.out==='pass')===r.passed);
+ const rows=R.filter(r=>(!p.case||r.case_id===p.case)&&(!p.model||r.model===p.model)&&(!p.tax||r.tax===p.tax)&&(!p.plane||r.plane===p.plane)&&outOk(r));
  $('hcount').textContent=`${rows.length} of ${R.length} investigations`; $('htable').innerHTML=RUNHEAD+rows.slice(0,400).map(runRow).join('')};
-['fcase','fmodel','fout','ftax'].forEach(id=>$(id).onchange=()=>nav('history',{case:$('fcase').value,model:$('fmodel').value,out:$('fout').value,tax:$('ftax').value}));
+['fcase','fmodel','fout','ftax','fplane'].forEach(id=>$(id).onchange=()=>nav('history',{case:$('fcase').value,model:$('fmodel').value,out:$('fout').value,tax:$('ftax').value,plane:$('fplane').value}));
 
 /* failure taxonomy */
 VIEWS.taxonomy=async p=>{const el=$('taxonomy');
@@ -239,7 +248,7 @@ function hypCards(hs){if(!hs.length)return '<div class="hint">No hypothesis boar
   let cls='hyp'; if(y.gt&&conf)cls+=' gt-conf'; else if(y.gt&&rej)cls+=' gt-rej'; else if(conf)cls+=' conf';
   const tag=y.gt?'<span class="tag truth">GROUND TRUTH</span>':conf?'<span class="tag distractor">CONFIRMED, NOT THE CAUSE</span>':'';
   return `<div class="${cls}">${y.traj.map(s=>`<span class="st ${s}">${s}</span>`).join(' → ')}${tag}<div style="margin-top:5px">${esc(y.text)}</div>${y.reason?`<div class="reason">${esc(y.reason)}</div>`:''}</div>`}).join('')}
-const head=p=>{const r=p.run||{}, t=p.timeline.totals||{}; return `<a href="#trace?inv=${esc(p.timeline.investigation_id)}">${esc(p.timeline.investigation_id)}</a>${xlinks(r.links,true)} ${r.run_id?outcome(r):''} ${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax])}">${r.tax}</span>`:''} <span class="hint">${esc(r.model||'')} · score ${r.composite??'—'} · ${t.rounds||0} rounds · ${t.reads||0} reads</span>`};
+const head=p=>{const r=p.run||{}, t=p.timeline.totals||{}; return `<a href="#trace?ref=${esc(p.ref)}">${esc(p.timeline.investigation_id)}</a> <span class="plane ${esc(r.plane||'')}">${esc(r.plane_label||'')}</span>${xlinks(r.links,true)} ${r.run_id||r.scored===false?outcome(r):''} ${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax])}">${r.tax}</span>`:''} <span class="hint">${esc(r.model||'')} · score ${r.composite??'—'} · ${t.rounds||0} rounds · ${t.reads||0} reads</span>`};
 const gtbox=p=>p.gt.description?`<div class="gtbox"><span class="k">GROUND TRUTH · ${esc(short(p.case_id))}</span><br>${esc(p.gt.description)}</div>`:'';
 const judge=p=>(p.judge||[]).length?`<div class="ovh">What the judge says the failing run missed</div>`+p.judge.slice(0,6).map(j=>`<p style="font-size:.84rem;margin:4px 0"><span class="pil">${esc(j.id||j.question_id||j.dim)}</span>${esc(j.evidence)}</p>`).join(''):'';
 async function drawMermaid(el,src){try{mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'strict'}); const {svg}=await mermaid.render('mm'+Date.now(),src); el.innerHTML=svg}
@@ -247,34 +256,35 @@ async function drawMermaid(el,src){try{mermaid.initialize({startOnLoad:false,the
 function copyText(t,btn){navigator.clipboard.writeText(t).then(()=>{const o=btn.textContent; btn.textContent='Copied'; setTimeout(()=>btn.textContent=o,1400)})}
 
 /* trace: one investigation */
-VIEWS.trace=async p=>{const out=$('out'); if(!p.inv)return; $('inv').value=p.inv; CTX=[p.inv]; setAsk();
+VIEWS.trace=async p=>{const out=$('out'); const ref=p.ref||p.inv; if(!ref)return; $('inv').value=ref; CTX=[ref]; setAsk();
  out.innerHTML='<div class="hint">building the timeline… a first load takes 10–30s, then it is cached</div>';
- try{const d=await get('/timeline?investigation_id='+encodeURIComponent(p.inv)); const t=d.timeline, ms=t.milestones, r=d.run||{};
+ try{const d=await get('/timeline?ref='+encodeURIComponent(ref)); CTX=[d.ref]; setAsk(); const t=d.timeline, ms=t.milestones, r=d.run||{};
   let h=`<h2>${head(d)}</h2>`+gtbox(d);
   h+=`<div class="ovh">Path of the ground-truth fact through this run${r.tax?` — <span class="bk ${r.tax}">${r.tax}</span> ${esc(TAXN[r.tax])}`:''}</div><div class="lad one">`+
    PATH.map(([k,l])=>`<div>${l}</div><div class="${ms[k]?'y':'n'}">${ms[k]?`round ${ms[k].round} · +${ms[k].t} min`:'never'}</div>`).join('')+`</div>`;
   if(t.summary_mentions_only)h+=`<div class="hint">The summary mentions the ground-truth component, but the judge says it is not blamed as the origin.</div>`;
-  if(r.run_id&&!r.passed)h+=judge(d)+`<p><a href="#compare?b=${esc(p.inv)}">Compare with a passing run of this case →</a></p>`;
+  if(r.scored===false)h+=`<div class="hint">No ground truth: ${esc(r.kind)} (${esc(r.summary||'')}). The timeline shows how it reasoned; the ladder above cannot be judged.</div>`;
+  if(r.run_id&&!r.passed)h+=judge(d)+`<p><a href="#compare?b=${esc(d.ref)}">Compare with a passing run of this case →</a></p>`;
   h+=`<div class="ovh">Timeline — one card per orchestrator dispatch; green marks contact with the ground truth</div><div class="cols one">${t.rounds.filter(x=>x.n).map(x=>roundCard(x,ms)).join('')||'<div class="hint">No rounds found in this trace.</div>'}</div>`;
   h+=`<div class="ovh">Hypotheses</div>${hypCards(t.hypotheses)}`;
   if(t.final_summary)h+=`<div class="ovh">Final root-cause summary</div><div class="summary">${esc(t.final_summary)}</div>`;
   out.innerHTML=h}catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
-$('go').onclick=()=>nav('trace',{inv:$('inv').value.trim()}); $('inv').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').onclick()});
+$('go').onclick=()=>nav('trace',{ref:$('inv').value.trim()}); $('inv').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').onclick()});
 
 /* compare: a run that reached the ground truth vs one that did not */
-const opt=r=>`<option value="${esc(r.investigation_id)}">${esc(r.investigation_id)} · ${esc(r.model)} · ${r.composite}${r.tax?' · '+r.tax:''} · ${esc(r.created_at.slice(0,10))}</option>`;
+const opt=r=>`<option value="${esc(r.ref)}">${esc(r.investigation_id)} · ${esc(r.plane_label)} · ${esc(r.model)} · ${r.composite}${r.tax?' · '+r.tax:''} · ${esc(r.created_at.slice(0,10))}</option>`;
 async function fillCompare(cid,a,b){const R=await runs(); if(!$('ccase').dataset.done){
-  const cs=[...new Set(R.map(r=>r.case_id))].filter(c=>R.some(r=>r.case_id===c&&r.passed&&r.funnel)&&R.some(r=>r.case_id===c&&!r.passed&&r.funnel)).sort();
+  const cs=[...new Set(R.map(r=>r.case_id).filter(Boolean))].filter(c=>R.some(r=>r.case_id===c&&r.passed&&r.funnel)&&R.some(r=>r.case_id===c&&!r.passed&&r.funnel)).sort();
   $('ccase').innerHTML+=cs.map(c=>`<option value="${c}">${short(c)}</option>`).join(''); $('ccase').dataset.done=1}
- $('ccase').value=cid||''; const S=R.filter(r=>r.case_id===cid&&r.funnel&&r.investigation_id);
+ $('ccase').value=cid||''; const S=R.filter(r=>r.case_id===cid&&r.funnel&&r.ref);
  $('cbad').innerHTML='<option value="">failing run…</option>'+S.filter(r=>!r.passed).map(opt).join('');
  $('cok').innerHTML='<option value="">passing run…</option>'+S.filter(r=>r.passed).map(opt).join('');
  $('cbad').value=b||''; $('cok').value=a||''}
 VIEWS.compare=async p=>{const out=$('cout'); const R=await runs(); let {a,b}=p; let cid=p.case||'';
- const find=i=>R.find(r=>r.investigation_id===i);
+ const find=i=>R.find(r=>r.ref===i);
  try{
-  if(cid&&!a&&!b){const f=R.find(r=>r.case_id===cid&&r.funnel&&!r.passed); if(f)b=f.investigation_id}
-  if(b&&!a){const ps=(await get('/partners?investigation_id='+encodeURIComponent(b))).partners; if(ps.length)a=ps[0].investigation_id}
+  if(cid&&!a&&!b){const f=R.find(r=>r.case_id===cid&&r.funnel&&r.scored!==false&&!r.passed); if(f)b=f.ref}
+  if(b&&!a){const ps=(await get('/partners?ref='+encodeURIComponent(b))).partners; if(ps.length)a=ps[0].ref}
   cid=cid||(find(b)||find(a)||{}).case_id||''; await fillCompare(cid,a,b);
   if(b&&!a){out.innerHTML='<div class="hint">This case has no passing run with a trace to compare against.</div>';return}
   if(!a||!b)return;
@@ -315,7 +325,7 @@ function drawChat(){const key=CTX.join('|'); if(CHAT.key!==key)CHAT={key,msgs:[]
 async function ask(q){q=(q||'').trim(); if(!q)return; CHAT.msgs.push({role:'user',content:q}); drawChat();
  $('clog').insertAdjacentHTML('beforeend','<div class="hint" id="cwait">reading the trace…</div>'); $('clog').scrollTop=1e9;
  const key=CHAT.key, log=CHAT.msgs;
- try{const j=await (await fetch(API+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:log,context:{investigation_ids:CTX}})})).json();
+ try{const j=await (await fetch(API+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:log,context:{refs:CTX}})})).json();
   log.push({role:'assistant',content:j.status==='success'?j.data.answer:'Chat failed: '+(j.error||'unknown error')})}
  catch(e){log.push({role:'assistant',content:'Chat failed: '+e.message})} if(CHAT.key===key)drawChat()}
 $('askbtn').onclick=()=>{$('chat').classList.add('on'); drawChat(); $('cin').focus()}; $('cclose').onclick=()=>$('chat').classList.remove('on');

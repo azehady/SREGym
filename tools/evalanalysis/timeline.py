@@ -55,12 +55,13 @@ def _has(text, terms) -> bool:
     return any(x in t for x in terms)
 
 
-def raw_trace(inv: str) -> tuple[dict, str]:
-    if inv not in _RAW:
+def raw_trace(ref: str) -> tuple[dict, str]:
+    """ref = '<plane>:<INV>' (INV ids collide across clusters, so the plane picks the source)."""
+    if ref not in _RAW:
         if len(_RAW) >= 4:
             _RAW.pop(next(iter(_RAW)))
-        _RAW[inv] = dict(zip(("trace", "source"), T.fetch_any(inv)))
-    return _RAW[inv]["trace"], _RAW[inv]["source"]
+        _RAW[ref] = dict(zip(("trace", "source"), T.fetch(ref)))
+    return _RAW[ref]["trace"], _RAW[ref]["source"]
 
 
 def _note_kind(text: str) -> str:
@@ -76,16 +77,17 @@ def _note_kind(text: str) -> str:
     return "thinking"
 
 
-def build(inv: str, terms: list[str], summary: str = "") -> dict:
+def build(ref: str, terms: list[str], summary: str = "") -> dict:
     """Investigation -> ordered rounds with GT flags and milestones."""
     terms = [t.lower() for t in terms]
-    trace, source = raw_trace(inv)
+    trace, source = raw_trace(ref)
+    inv = T.split_ref(ref)[1]
     spans = list(T._walk(trace.get("spans") or []))
     events = sorted(((li.get("timestamp") or "", s.get("agent_name"), li)
                      for s in spans for li in (s.get("llm_interactions") or [])),
                     key=lambda e: e[0])
     if not events:
-        return {"investigation_id": inv, "source": source, "rounds": [], "milestones": {},
+        return {"investigation_id": inv, "ref": ref, "source": source, "rounds": [], "milestones": {},
                 "hypotheses": [], "final_summary": summary, "terms": terms, "empty": True}
     t0 = _ts(events[0][0])
     mins = lambda ts: round(((_ts(ts) or t0) - t0).total_seconds() / 60, 1) if t0 else 0
@@ -194,7 +196,7 @@ def build(inv: str, terms: list[str], summary: str = "") -> dict:
         ms["hypothesis"] = {"round": rounds[-1]["n"], "t": rounds[-1]["t"]}
     if not ms["confirmed"] and any(h["status"] == "confirmed" for h in gt_h):
         ms["confirmed"] = {"round": rounds[-1]["n"], "t": rounds[-1]["t"]}
-    return {"investigation_id": inv, "source": source, "terms": terms,
+    return {"investigation_id": inv, "ref": ref, "source": source, "terms": terms,
             "duration_min": rounds[-1]["t"] if rounds else 0, "rounds": rounds,
             "hypotheses": hyps, "final_summary": str(summary)[:3000], "milestones": ms,
             "totals": {"rounds": len(rounds) - 1, "reads": sum(len(r["reads"]) for r in rounds),
@@ -202,17 +204,17 @@ def build(inv: str, terms: list[str], summary: str = "") -> dict:
                        "findings": sum(len(r["findings"]) for r in rounds)}}
 
 
-def get(inv: str, terms: list[str], summary: str = "") -> dict:
-    """Disk-cached build; the key includes the terms so re-tuned terms rebuild."""
-    key = hashlib.sha1((inv + "|" + ",".join(sorted(terms))).encode()).hexdigest()[:10]
+def get(ref: str, terms: list[str], summary: str = "") -> dict:
+    """Disk-cached build; the key includes plane and terms, so re-tuned terms rebuild."""
+    key = hashlib.sha1((ref + "|" + ",".join(sorted(terms))).encode()).hexdigest()[:10]
     CACHE_DIR.mkdir(exist_ok=True)
-    f = CACHE_DIR / f"{inv}-{key}.json"
+    f = CACHE_DIR / f"{ref.replace(':', '_')}-{key}.json"
     if f.exists():
         try:
             return json.loads(f.read_text())
         except ValueError:
             pass
-    tl = build(inv, terms, summary)
+    tl = build(ref, terms, summary)
     f.write_text(json.dumps(tl))
     return tl
 
@@ -266,7 +268,7 @@ def compare(ok: dict, bad: dict) -> dict:
         if instead:
             story += f" It confirmed instead: \"{instead[0]['text'][:160]}\"."
     missing = [d for d in decisive if not d["also_in_fail"]]
-    return {"ok": ok["investigation_id"], "bad": bad["investigation_id"], "rows": rows,
+    return {"ok": ok.get("ref") or ok["investigation_id"], "bad": bad.get("ref") or bad["investigation_id"], "rows": rows,
             "divergence": div, "story": story, "decisive_reads": decisive[:14],
             "reads_missing_in_fail": len(missing), "fail_gt_hypotheses": gt_h,
             "fail_confirmed_instead": instead, "mermaid": mermaid(ok, bad, rows, div)}
@@ -329,9 +331,9 @@ def digest(tl: dict, cap: int = 9000) -> str:
     return text if len(text) <= cap else text[:cap] + "\n…(truncated; use round_detail / grep_trace)"
 
 
-def grep(inv: str, pattern: str, limit: int = 12) -> list[dict]:
+def grep(ref: str, pattern: str, limit: int = 12) -> list[dict]:
     """Search an investigation's tool outputs and agent findings; returns short snippets."""
-    trace, _ = raw_trace(inv)
+    trace, _ = raw_trace(ref)
     rx = re.compile(pattern, re.I)
     hits, seen = [], set()
     for s in T._walk(trace.get("spans") or []):

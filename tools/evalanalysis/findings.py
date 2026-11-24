@@ -57,7 +57,7 @@ def _reads_for(inv: str, cache: dict) -> tuple[list[str], str] | None:
 
 
 def _case_invs(case: str) -> tuple[list[str], list[str]]:
-    c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
+    c = A._conn()
     P, F = [], []
     for inv, s in c.execute(
         "select investigation_id, common_score_json from eval_runs "

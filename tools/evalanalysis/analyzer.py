@@ -58,8 +58,21 @@ GROUND_TRUTH: dict[str, dict] = {
 _WORD = re.compile(r"[a-z0-9][a-z0-9.-]*")
 
 
+MIRROR = Path(__file__).resolve().parent / "prod0_evals.sqlite3"
+PROD0_ORG = "fa2f0f5e-d35e-42c8-b7c9-018075de2340"
+
+
 def _conn() -> sqlite3.Connection:
+    """Local eval DB, with prod0's campaign runs (prod0_sync mirror) UNION-ed in as `eval_runs`.
+
+    A TEMP view shadows main.eval_runs for unqualified names, so every existing query sees both."""
     c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    if MIRROR.exists():
+        c.execute(f"attach database 'file:{MIRROR}?mode=ro' as p0")
+        cols = ", ".join(r[1] for r in c.execute("pragma main.table_info(eval_runs)"))
+        c.execute(f"create temp view eval_runs as select {cols} from main.eval_runs union all "
+                  f"select {cols} from p0.eval_runs where correlation_id not in "
+                  f"(select correlation_id from main.eval_runs)")
     c.row_factory = sqlite3.Row
     return c
 
@@ -98,6 +111,13 @@ class RunView:
     failing_subquestions: list[dict] = field(default_factory=list)
     bucket: str = ""                        # the failure bucket, "" when passed
     stage: str = ""                         # judge-derived failing stage; needs no curated GT
+    plane: str = "evals"                    # cluster that ran it: "prod0" | "evals" (INV ids collide)
+    project_id: int | None = None
+
+    @property
+    def ref(self) -> str:
+        """Unique investigation key: INV ids are per-cluster counters, so plane is part of it."""
+        return f"{self.plane}:{self.investigation_id}" if self.investigation_id else ""
 
 
 def _bucket(v: RunView, gt: dict | None) -> str:
@@ -131,11 +151,25 @@ def _stage(v: "RunView") -> str:
     return "MARGINAL"                # no single dimension collapsed; composite under threshold
 
 
+def plane_of(meta_json: str | None) -> tuple[str, int | None]:
+    """Which cluster investigated, from the investigation's own organization id."""
+    try:
+        m = json.loads(meta_json or "{}")
+    except ValueError:
+        m = {}
+    inv = m.get("investigation") or {}
+    proj = (inv.get("project_ids") or [None])[0]
+    if m.get("plane") == "prod0" or inv.get("organization_id") == PROD0_ORG:
+        return "prod0", proj
+    return "evals", proj
+
+
 def load_runs(case_id: str | None = None, model: str | None = None) -> list[RunView]:
     """Every scored run, reduced to RunViews. Optional case / model filter."""
     q = ("select id, case_id, resolved_model, behavior_pattern_id, "
          "resolved_behavior_pattern_ids_json, batch_id, created_at, common_score_json, "
-         "rca_json, investigation_id from eval_runs where common_score_json is not null")
+         "rca_json, investigation_id, investigation_metadata_json from eval_runs "
+         "where common_score_json is not null")
     args: list = []
     if case_id:
         q += " and case_id = ?"; args.append(case_id)
@@ -170,6 +204,7 @@ def load_runs(case_id: str | None = None, model: str | None = None) -> list[RunV
                                   for q_ in score.get("question_results", [])
                                   if not q_["answer"]],
         )
+        v.plane, v.project_id = plane_of(r["investigation_metadata_json"])
         v.bucket = _bucket(v, gt)
         v.stage = _stage(v)
         out.append(v)

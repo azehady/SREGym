@@ -83,6 +83,25 @@ def fetch_trace_clickhouse(investigation_id: str) -> dict:
     return {"spans": spans, "total_tokens": 0, "total_duration_ms": 0}
 
 
+def split_ref(ref: str) -> tuple[str | None, str]:
+    """'prod0:INV-1' -> ('prod0', 'INV-1'); a bare id has no plane."""
+    if ":" in ref and not ref.startswith("INV-"):
+        plane, inv = ref.split(":", 1)
+        return plane, inv
+    return None, ref
+
+
+def fetch(ref: str) -> tuple[dict, str]:
+    """Fetch from the cluster the investigation ran on. INV ids collide across clusters, so a
+    bare id falls back to fetch_any's guess, which can return a DIFFERENT investigation."""
+    plane, inv = split_ref(ref)
+    if plane == "prod0":
+        return fetch_trace(inv), "prod0"
+    if plane == "evals":
+        return fetch_trace_clickhouse(inv), "clickhouse"
+    return fetch_any(inv)
+
+
 def fetch_any(investigation_id: str) -> tuple[dict, str]:
     """Try prod0 first; fall back to the evals_gke ClickHouse for kind-plane runs."""
     try:

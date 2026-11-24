@@ -254,3 +254,7 @@ tools/evalanalysis/findings_cache.json
 tools/evalanalysis/reads_cache.json
 tools/evalanalysis/features_cache.json
 tools/evalanalysis/timeline_cache/
+tools/evalanalysis/prod0_evals.sqlite3
+tools/evalanalysis/prod0_investigations.json
+tools/evalanalysis/mlflow_map.json
+tools/evalanalysis/gt_catalog.json

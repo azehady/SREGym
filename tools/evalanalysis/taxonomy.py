@@ -86,6 +86,22 @@ GT_DESC: dict[str, str] = {
     "wrong_dns_policy_astronomy_shop": "A deployment with dnsPolicy None and external resolver 8.8.8.8, so cluster-internal names do not resolve.",
 }
 
+def gt_terms(case: str) -> list[str]:
+    """Hand-curated terms win; otherwise terms derived from SREGym's own root cause."""
+    if case in GT_TERMS:
+        return GT_TERMS[case]
+    from evalanalysis import gt_catalog
+    return (gt_catalog.load().get(case) or {}).get("terms", [])
+
+
+def gt_desc(case: str) -> str:
+    if case in GT_DESC:
+        return GT_DESC[case]
+    from evalanalysis import gt_catalog
+    g = gt_catalog.load().get(case) or {}
+    return f"{g['component']}: {g['description']}" if g.get("description") else ""
+
+
 # Patterns require the artifact framed as a failure, not merely cited as a data source.
 ARTIFACTS: dict[str, str] = {
     "otel collector / DNS flood": r"otel.?collector.{0,80}(fail|error|dns|unreachable|crash|export)|dns (lookup )?flood",
@@ -115,9 +131,10 @@ def _hits(text: str) -> list[str]:
     return [x for x in _ALL_TERMS if x in t]
 
 
-def extract(inv: str) -> dict:
+def extract(ref: str) -> dict:
     """Trace → compact features. Layer hits are over the union of every case's terms."""
-    trace, source = T.fetch_any(inv)
+    trace, source = T.fetch(ref)
+    inv = T.split_ref(ref)[1]
     spans = list(T._walk(trace.get("spans") or []))
     outputs, ledger, board = [], [], []
     tool_n = tool_err = melt_n = 0
@@ -177,25 +194,54 @@ def _cache() -> dict:
         return {}
 
 
-def build(workers: int = 4, limit: int | None = None) -> dict:
-    cache = _cache()
-    c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
-    invs = [r[0] for r in c.execute(
-        "select distinct investigation_id from eval_runs where common_score_json is not null "
-        "and investigation_id like 'INV-%' order by created_at desc")]
-    todo = [i for i in invs if i not in cache][:limit]
-    print(f"{len(invs)} investigations, {len(todo)} to extract", flush=True)
+def _migrate(cache: dict) -> dict:
+    """Old caches were keyed by bare INV id and fetched prod0-first; keep an entry only when its
+    source matches the run's real plane (else it is another cluster's investigation)."""
+    if not cache or all(":" in k and not k.startswith("INV-") for k in cache):
+        return cache
+    # Old entries were built from the LOCAL DB only; the prod0 mirror reuses the same INV numbers.
+    c = A._conn()
+    planes = {inv: A.plane_of(m)[0] for inv, m in c.execute(
+        "select investigation_id, investigation_metadata_json from main.eval_runs "
+        "where investigation_id like 'INV-%'")}
+    out = {k: v for k, v in cache.items() if ":" in k and not k.startswith("INV-")}
+    for inv, feat in cache.items():
+        if not inv.startswith("INV-"):
+            continue
+        plane = planes.get(inv)
+        src = {"prod0": "prod0", "clickhouse": "evals"}.get((feat or {}).get("source"))
+        if plane and src == plane:
+            out[f"{plane}:{inv}"] = feat
+    return out
 
-    def one(inv):
+
+def targets() -> list[str]:
+    """Every investigation worth a trace: all scored runs, plus completed prod0 investigations
+    that no scored run covers (production alerts, unscored evals) — open alerts have no trace."""
+    from evalanalysis import prod0_sync as P
+    refs = [r.ref for r in sorted(A.load_runs(), key=lambda r: r.created_at, reverse=True) if r.ref]
+    have = set(refs)
+    for inv, m in sorted(P.load_index().items(), reverse=True):
+        if m.get("status") == "COMPLETED" and f"prod0:{inv}" not in have:
+            refs.append(f"prod0:{inv}")
+    return refs
+
+
+def build(workers: int = 3, limit: int | None = None) -> dict:
+    cache = _migrate(_cache())
+    todo = [r for r in targets() if r not in cache][:limit]
+    print(f"{len(cache)} cached, {len(todo)} to extract", flush=True)
+
+    def one(ref):
         try:
-            return inv, extract(inv)
+            return ref, extract(ref)
         except Exception as e:  # keep going; record the failure
-            return inv, {"error": str(e)[:200]}
+            return ref, {"error": str(e)[:200]}
 
     done = 0
     with ThreadPoolExecutor(workers) as ex:
-        for inv, feat in ex.map(one, todo):
-            cache[inv] = feat
+        for ref, feat in ex.map(one, todo):
+            cache[ref] = feat
             done += 1
             if done % 20 == 0:
                 FEATURES.write_text(json.dumps(cache))
@@ -216,6 +262,7 @@ BUCKETS = {
     "G": ("BP misdirection", "BP selection"),
     "H": ("Budget exhaustion", "budget"),
     "N": ("Named as origin, judged incomplete", "characterization depth (D2/D3), not localization"),
+    "M": ("Miscellaneous", "no mechanical test applies (no usable trace, or no GT terms for the case): review by hand"),
 }
 
 # BP families that fit a Misconfiguration fault; anything else on such a case is a misdirection.
@@ -228,7 +275,7 @@ def _artifacts(summary: str) -> list[str]:
 
 def classify(run, feat: dict | None, fault_type: str = "", summary: str = "", inv_status: str = "COMPLETED") -> dict:
     """One run → primary bucket + secondary flags + the funnel strip (which layers held the GT)."""
-    terms = GT_TERMS.get(run.case_id, [])
+    terms = gt_terms(run.case_id)
     summary = (summary or "").lower()
     in_sum = bool(terms) and any(t in summary for t in terms)
     arts = _artifacts(summary)
@@ -237,7 +284,11 @@ def classify(run, feat: dict | None, fault_type: str = "", summary: str = "", in
     if feat is None or "error" in feat or empty:   # trace store returned nothing usable
         res["flags"].append("no_trace")
         res["primary"] = ("" if run.passed else ("N" if run.d1 >= 0.5 else "C") if in_sum
-                          else "E" if arts else "?")
+                          else "E" if arts else "M")
+        return res
+    if not terms:                       # the case has no usable GT terms: nothing to trace
+        res["flags"].append("no_gt_terms")
+        res["primary"] = "" if run.passed else ("E" if arts else "M")
         return res
     hit = lambda layer: bool(set(terms) & set(feat.get(layer) or []))
     gt_hyps = [h for h in feat["hyps"] if any(t in h["text"].lower() for t in terms)]

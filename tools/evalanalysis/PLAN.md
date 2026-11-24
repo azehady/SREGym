@@ -40,6 +40,8 @@ Track the ground-truth fact through four layers. The layer where it drops out is
 | F | Tool or capability failure | MELT tool_count=0, describe eliding spec, guardrail rejection, namespace ambiguity | tool fixes |
 | G | BP misdirection | wrong BP picked for a Misconfiguration-type fault | BP selection (ties to the −0.11 Misconfiguration finding) |
 | H | Budget exhaustion | hit the round or time cap before reaching it | budget |
+| N | Named, judged incomplete | conclusion blames the GT (D1 ≥ 0.5) but D2/D3 fail | characterization depth |
+| M | Miscellaneous | no mechanical test applies: no usable trace, or no GT terms for the case | review by hand; add terms or re-fetch |
 
 Prior: across 6 past interventions, tool and evidence fixes moved scores and prompt fixes did not.
 Expect the returns in A, B, E and F, and little from C.
@@ -104,3 +106,14 @@ Force those probes as a first-round sweep for the weak model, then re-score.
 - In progress: the Failure-taxonomy tab currently groups by judge dimension
   (LOCALIZATION / CHARACTERIZATION / SCOPE). It must classify every run into A–H using the tests
   above.
+
+## Data sources (2026-11-24)
+- Local eval DB (`brahma/oracle/.artifacts/evals.sqlite3`): evals_gke and prod0 runs from the local harness.
+- prod0 campaigns (`/api/v1/evals/campaigns/<id>` on prod0.ciroos.ai): scored runs mirrored into
+  `prod0_evals.sqlite3` by `prod0_sync.py`; the analyzer UNIONs them in, deduplicated by correlation id.
+- Every other prod0 investigation (production alerts, unscored evals) is indexed and shown without
+  ground truth. Open alerts were never investigated and are skipped.
+- **INV ids are per-cluster counters.** Every key is `plane:INV` (`prod0` | `evals`), shown as
+  prod0 / evals_gke under each id. A bare id once pulled the wrong cluster's trace for 103 runs.
+- Ground truth for cases beyond the curated set comes from `gt_catalog.py`, which reads SREGym's
+  own `build_structured_root_cause` / `configure_port` / Incident-Arena docstrings.

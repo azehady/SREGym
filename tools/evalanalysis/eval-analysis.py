@@ -28,6 +28,7 @@ from evalanalysis import trace_analyzer as T  # noqa: E402
 from evalanalysis import findings as FD  # noqa: E402
 from evalanalysis import taxonomy as X  # noqa: E402
 from evalanalysis import timeline as TL  # noqa: E402
+from evalanalysis import prod0_sync as P0  # noqa: E402
 
 
 def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
@@ -37,7 +38,7 @@ def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]
         return [t.strip() for t in override.split(",") if t.strip()], ""
     try:
         import sqlite3
-        c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
+        c = A._conn()
         row = c.execute("select case_id from eval_runs where investigation_id=? limit 1",
                         (inv,)).fetchone()
         if row and row[0] in X.GT_TERMS:
@@ -70,7 +71,7 @@ TOOLS = {
 TOOLS["round_detail"] = lambda investigation_id, round, **_: next(
     (r for r in _inv_payload(investigation_id)["timeline"]["rounds"] if r["n"] == int(round)),
     {"error": "no such round"})
-TOOLS["grep_trace"] = lambda investigation_id, pattern, **_: TL.grep(investigation_id, pattern)
+TOOLS["grep_trace"] = lambda investigation_id, pattern, **_: TL.grep(_resolve(investigation_id), pattern)
 
 TOOL_SCHEMA = [
     {"type": "function", "function": {
@@ -78,14 +79,16 @@ TOOL_SCHEMA = [
         "description": "Full detail of one round of an investigation: tasks, every read with its "
                        "target, agent findings, orchestrator notes, board changes.",
         "parameters": {"type": "object", "properties": {
-            "investigation_id": {"type": "string"}, "round": {"type": "integer"}},
+            "investigation_id": {"type": "string", "description": "ref like prod0:INV-0000002351"},
+            "round": {"type": "integer"}},
             "required": ["investigation_id", "round"]}}},
     {"type": "function", "function": {
         "name": "grep_trace",
         "description": "Regex-search the raw tool outputs of an investigation (kubectl / logs / "
                        "metrics results). Use to check whether a fact was actually in the evidence.",
         "parameters": {"type": "object", "properties": {
-            "investigation_id": {"type": "string"}, "pattern": {"type": "string"}},
+            "investigation_id": {"type": "string", "description": "ref like evals:INV-0000001974"},
+            "pattern": {"type": "string"}},
             "required": ["investigation_id", "pattern"]}}},
     {"type": "function", "function": {
         "name": "list_contrastable_cases",
@@ -127,7 +130,8 @@ SYSTEM = (
     "classified by where the ground-truth fact drops out of the run: A never gathered, B gathered "
     "but not reported by the agent, C surfaced but mis-ranked, D confirmed then dropped from the "
     "conclusion, E distractor capture (environment artifact blamed), F tool failure, G BP "
-    "misdirection, H budget exhaustion, N named but judged incomplete. When asked why something "
+    "misdirection, H budget exhaustion, N named but judged incomplete, M miscellaneous (no "
+    "mechanical test applies: no usable trace or no GT terms). When asked why something "
     "failed, name the layer, quote the run's own reasoning, and say which harness change addresses "
     "it (first-round sweep, evidence extraction, completion gate, ranking, reporter, noise "
     "suppression, tools). Be concrete and brief. Prometheus was down on the eval cluster through "
@@ -264,142 +268,156 @@ document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter'
 </script></body></html>"""
 
 
-# Deep links beside every investigation id. evals_gke runs open in the eval observer and (when the
-# trace is still in sleuth's MLflow) in MLflow; kind-plane runs investigated by prod0 open there.
+# Deep links beside every investigation id. INV ids are per-cluster counters, so every link and
+# lookup is keyed by ref = "<plane>:<INV>" (plane "prod0" | "evals", shown as prod0 / evals_gke).
 UI_BASE = os.environ.get("EVAL_UI_BASE", "https://evals-dev.ruffe-bowfin.ts.net:8443")
 UI_PROJECT = os.environ.get("EVAL_UI_PROJECT", "2")
 PROD0_UI = os.environ.get("EVAL_PROD0_UI", "https://prod0.ciroos.ai")
-MLFLOW = os.environ.get("EVAL_MLFLOW", "http://sleuth-service.ciroos.svc.cluster.local:5000")
 MLFLOW_PATH = "/ciroos/dev-tools/mlflow"
-_ML: dict = {"at": 0.0, "map": {}}
+PLANE_LABEL = {"prod0": "prod0", "evals": "evals_gke"}
 
 
-def _mlflow_map() -> dict:
-    """investigation_id -> (experiment_id, newest trace id), refreshed every 10 minutes."""
-    import time
-    if time.time() - _ML["at"] < 600:
-        return _ML["map"]
-    out: dict[str, tuple] = {}
-    try:
-        token = None
-        for _ in range(40):
-            body = {"locations": [{"type": "MLFLOW_EXPERIMENT",
-                                   "mlflow_experiment": {"experiment_id": "1"}}],
-                    "max_results": 500, "order_by": ["timestamp_ms DESC"]}
-            if token:
-                body["page_token"] = token
-            req = urllib.request.Request(
-                f"{MLFLOW}{MLFLOW_PATH}/ajax-api/3.0/mlflow/traces/search",
-                data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-            page = json.loads(urllib.request.urlopen(req, timeout=30).read())
-            for t in page.get("traces") or []:
-                inv = (t.get("tags") or {}).get("investigation_id")
-                if inv and inv not in out:      # newest first, so the first seen wins
-                    exp = t.get("trace_location", {}).get("mlflow_experiment", {}).get("experiment_id", "1")
-                    out[inv] = (exp, t["trace_id"])
-            token = page.get("next_page_token")
-            if not token:
-                break
-    except Exception as e:
-        print(f"mlflow map failed: {e}", file=sys.stderr)
-        if _ML["map"]:
-            return _ML["map"]
-    _ML.update(at=time.time(), map=out)
-    return out
-
-
-def _links(inv: str | None) -> dict:
-    if not inv or not inv.startswith("INV-"):
+def _links(ref: str, project: int | None = None) -> dict:
+    plane, inv = T.split_ref(ref)
+    if not inv.startswith("INV-") or not plane:
         return {}
-    if (X.load_cached().get(inv) or {}).get("source") == "prod0":
-        return {"investigation": f"{PROD0_UI}/investigations/{inv}?projectId={T.PROJECT}",
-                "mlflow": None, "plane": "prod0"}
-    ml = _mlflow_map().get(inv)
-    return {"investigation": f"{UI_BASE}/investigations/{inv}?projectId={UI_PROJECT}",
-            "mlflow": (f"{UI_BASE}{MLFLOW_PATH}/#/experiments/{ml[0]}/traces?workflowType=genai"
-                       f"&traceId={ml[1]}") if ml else None, "plane": "evals"}
+    ml = (P0.load_mlflow().get(plane) or {}).get(inv)
+    if plane == "prod0":
+        base, proj = PROD0_UI, project or T.PROJECT
+    else:
+        base, proj = UI_BASE, UI_PROJECT
+    return {"investigation": f"{base}/investigations/{inv}?projectId={proj}",
+            "mlflow": (f"{base}{MLFLOW_PATH}/#/experiments/{ml[0]}/traces?workflowType=genai"
+                       f"&traceId={ml[1]}") if ml else None,
+            "plane": plane, "plane_label": PLANE_LABEL[plane]}
 
 
 def _row(r, full: bool = False) -> dict:
     t = _tax().get(r.run_id, {})
-    d = {"run_id": r.run_id, "investigation_id": r.investigation_id, "case_id": r.case_id,
-         "model": (r.model or "unknown").split("/")[-1], "passed": r.passed,
+    d = {"run_id": r.run_id, "ref": r.ref, "investigation_id": r.investigation_id,
+         "plane": r.plane, "plane_label": PLANE_LABEL.get(r.plane, r.plane), "case_id": r.case_id,
+         "model": (r.model or "unknown").split("/")[-1], "passed": r.passed, "scored": True,
          "composite": round(r.composite, 2), "d1": round(r.d1, 2), "d2": round(r.d2, 2),
          "d3": round(r.d3, 2), "stage": r.stage, "tax": t.get("primary", ""),
          "flags": t.get("flags", []), "funnel": t.get("funnel"),
          "names_gt": r.summary_names_gt, "bp": r.bp_id, "created_at": r.created_at[:16],
-         "links": _links(r.investigation_id)}
+         "links": _links(r.ref, r.project_id)}
     if full:  # training/export record: what the judge said was missed, the funnel, and the trace
         d["failing_subquestions"] = r.failing_subquestions
-        d["ground_truth"] = X.GT_TERMS.get(r.case_id)
+        d["ground_truth"] = {"terms": X.gt_terms(r.case_id), "description": X.gt_desc(r.case_id)}
         d["artifacts"] = t.get("artifacts", [])
-        f = X.load_cached().get(r.investigation_id or "") or {}
+        f = X.load_cached().get(r.ref) or {}
         d["reads"] = f.get("reads")
         d["hypotheses"] = f.get("hyps")
         d["picked_bp"] = f.get("bp")
     return d
 
 
-_TAX: dict = {"mtime": None, "runs": {}, "meta": {}, "by_inv": {}}
+def _unscored_row(m: dict, full: bool = False) -> dict:
+    """A prod0 investigation with no scored eval run: production alert or unscored eval."""
+    ref = f"prod0:{m['investigation_id']}"
+    f = X.load_cached().get(ref) or {}
+    d = {"run_id": "", "ref": ref, "investigation_id": m["investigation_id"], "plane": "prod0",
+         "plane_label": "prod0", "case_id": "", "kind": "eval, no score" if m.get("eval_correlation_id")
+         else "production", "summary": m.get("summary"), "status": m.get("status"),
+         "model": (m.get("model") or "default").replace("litellm:", "").split("/")[-1],
+         "passed": None, "scored": False, "composite": None, "d1": None, "d2": None, "d3": None,
+         "tax": "", "flags": [], "funnel": None, "created_at": (m.get("created_at") or "")[:16],
+         "has_trace": bool(f.get("rounds")), "links": _links(ref, m.get("project_id"))}
+    if full:
+        d["reads"], d["hypotheses"], d["picked_bp"] = f.get("reads"), f.get("hyps"), f.get("bp")
+        d["rca_description"] = m.get("rca_description")
+    return d
+
+
+def _unscored() -> list[dict]:
+    """prod0 investigations no scored run covers. OPEN alerts were never investigated: skipped."""
+    _tax()
+    covered = set(_TAX["by_ref"])
+    corr = _TAX["corr"]
+    return [m for inv, m in P0.load_index().items()
+            if f"prod0:{inv}" not in covered and m.get("status") in ("COMPLETED", "ERRORED")
+            and m.get("eval_correlation_id") not in corr]
+
+
+_TAX: dict = {"mtime": None, "runs": {}, "meta": {}, "by_ref": {}, "corr": set()}
 
 
 def _tax() -> dict:
     """run_id -> A–H classification; recomputed when features_cache.json changes."""
     try:
-        mt = os.path.getmtime(X.FEATURES)
+        mt = (os.path.getmtime(X.FEATURES), os.path.getmtime(A.MIRROR) if A.MIRROR.exists() else 0)
     except OSError:
-        mt = 0
+        mt = (0, 0)
     if _TAX["mtime"] == mt:
         return _TAX["runs"]
-    import sqlite3
-    c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
-    meta = {rid: (rca, st) for rid, rca, st in c.execute(
-        "select id, rca_json, investigation_status from eval_runs")}
+    c = A._conn()
+    meta, corr = {}, set()
+    for rid, rca, st, cid in c.execute(
+            "select id, rca_json, investigation_status, correlation_id from eval_runs"):
+        meta[rid] = (rca, st)
+        corr.add(cid)
     try:
         types = json.load(open(os.path.expanduser(
             "~/ciroos/eval-runs/bp-ab/taxonomy.json")))["cases"]
     except Exception:
         types = {}
     feats = X.load_cached(force=True)
+    runs = A.load_runs()
     out = {}
-    for r in A.load_runs():
+    for r in runs:
         rca, st = meta.get(r.run_id, (None, None))
-        out[r.run_id] = X.classify(r, feats.get(r.investigation_id or ""),
-                                   (types.get(r.case_id) or {}).get("type", ""),
+        out[r.run_id] = X.classify(r, feats.get(r.ref), (types.get(r.case_id) or {}).get("type", ""),
                                    A._summary_text(rca), st or "COMPLETED")
-    by_inv = {r.investigation_id: r for r in sorted(A.load_runs(), key=lambda r: r.created_at)
-              if r.investigation_id}
-    _TAX.update(mtime=mt, runs=out, meta=meta, by_inv=by_inv)
+    by_ref = {r.ref: r for r in sorted(runs, key=lambda r: r.created_at) if r.ref}
+    _TAX.update(mtime=mt, runs=out, meta=meta, by_ref=by_ref, corr=corr)
     return out
 
 
-def _inv_payload(inv: str) -> dict:
+def _resolve(ref: str) -> str:
+    """Accept a bare INV id from old links: pick the scored run with that id (evals first)."""
+    if T.split_ref(ref)[0]:
+        return ref
+    _tax()
+    for plane in ("evals", "prod0"):
+        if f"{plane}:{ref}" in _TAX["by_ref"]:
+            return f"{plane}:{ref}"
+    return f"prod0:{ref}"
+
+
+def _inv_payload(ref: str) -> dict:
     """Everything the timeline / compare / chat views need for one investigation."""
     _tax()
-    r = _TAX["by_inv"].get(inv)
+    ref = _resolve(ref)
+    r = _TAX["by_ref"].get(ref)
     case = r.case_id if r else ""
-    terms = X.GT_TERMS.get(case, [])
-    summary = A._summary_text(_TAX["meta"].get(r.run_id, (None,))[0]) if r else ""
-    tl = dict(TL.get(inv, terms, summary))
+    terms = X.gt_terms(case)
+    if r:
+        summary = A._summary_text(_TAX["meta"].get(r.run_id, (None,))[0])
+    else:
+        summary = (P0.load_index().get(T.split_ref(ref)[1]) or {}).get("rca_description") or ""
+    tl = dict(TL.get(ref, terms, summary))
     # Ground truth beats keywords: a summary that mentions the component but that the judge says
     # does not blame it (D1 < 0.5) has NOT reached the summary milestone.
     if r and not r.passed and r.d1 < 0.5 and tl["milestones"].get("summary"):
         tl["milestones"] = {**tl["milestones"], "summary": None}
         tl["summary_mentions_only"] = True
-    return {"case_id": case, "run": _row(r) if r else None,
-            "gt": {"terms": terms, "description": X.GT_DESC.get(case, "")},
+    m = None if r else P0.load_index().get(T.split_ref(ref)[1])
+    return {"ref": ref, "case_id": case,
+            "run": _row(r) if r else (_unscored_row(m) if m else None),
+            "gt": {"terms": terms, "description": X.gt_desc(case)},
             "judge": r.failing_subquestions if r else [], "timeline": tl}
 
 
-def _partners(inv: str, n: int = 8) -> list[dict]:
+def _partners(ref: str, n: int = 8) -> list[dict]:
     """Same-case runs with the opposite outcome, same model first, then nearest in time."""
     _tax()
-    r = _TAX["by_inv"].get(inv)
+    r = _TAX["by_ref"].get(_resolve(ref))
     if not r:
         return []
     feats = X.load_cached()
-    c = [o for o in _TAX["by_inv"].values() if o.case_id == r.case_id and o.passed != r.passed
-         and feats.get(o.investigation_id, {}).get("rounds")]
+    c = [o for o in _TAX["by_ref"].values() if o.case_id == r.case_id and o.passed != r.passed
+         and (feats.get(o.ref) or {}).get("rounds")]
     from datetime import datetime as _dt
     when = lambda x: _dt.fromisoformat(x.created_at[:19])
     c.sort(key=lambda o: (o.model != r.model, abs((when(o) - when(r)).total_seconds())))
@@ -409,7 +427,7 @@ def _partners(inv: str, n: int = 8) -> list[dict]:
 def _compare(a: str, b: str) -> dict:
     pa, pb = _inv_payload(a), _inv_payload(b)
     # the run that reached the ground truth is the reference, whichever order they came in
-    if pb["run"] and pb["run"]["passed"] and not (pa["run"] and pa["run"]["passed"]):
+    if pb["run"] and pb["run"].get("passed") and not (pa["run"] and pa["run"].get("passed")):
         pa, pb = pb, pa
     diff = TL.compare(pa["timeline"], pb["timeline"])
     if pb["timeline"].get("summary_mentions_only"):
@@ -419,14 +437,11 @@ def _compare(a: str, b: str) -> dict:
     return {"ok": pa, "bad": pb, "diff": diff, "same_case": pa["case_id"] == pb["case_id"]}
 
 
-
-
 def _history(q: dict, full: bool = False) -> list[dict]:
-    """Every scored run, newest first, with optional case/model/stage/outcome filters."""
+    """Every scored run plus unscored prod0 investigations, newest first, with filters."""
     one = lambda k: (q.get(k) or [""])[0]
-    runs = A.load_runs(one("case_id") or None)
     out = []
-    for r in runs:
+    for r in A.load_runs(one("case_id") or None):
         row = _row(r, full)
         if one("model") and row["model"] != one("model"):
             continue
@@ -434,9 +449,18 @@ def _history(q: dict, full: bool = False) -> list[dict]:
             continue
         if one("tax") and row["tax"] != one("tax"):
             continue
-        if one("outcome") == "pass" and not r.passed or one("outcome") == "fail" and r.passed:
+        if one("plane") and row["plane"] != one("plane"):
+            continue
+        if one("outcome") in ("nogt",) or (one("outcome") == "pass" and not r.passed) \
+                or (one("outcome") == "fail" and r.passed):
             continue
         out.append(row)
+    if not one("case_id") and not one("tax") and one("outcome") in ("", "nogt") \
+            and one("plane") in ("", "prod0") and not one("stage"):
+        for m in _unscored():
+            row = _unscored_row(m, full)
+            if not one("model") or row["model"] == one("model"):
+                out.append(row)
     return sorted(out, key=lambda x: x["created_at"], reverse=True)
 
 
@@ -476,9 +500,11 @@ def _taxonomy() -> dict:
     return {"buckets": {k: sorted(v, key=lambda x: x["created_at"], reverse=True)
                         for k, v in buckets.items()},
             "matrix": matrix, "defs": X.BUCKETS, "funnel": funnel, "models": models,
-            "gt": X.GT_DESC,
+            "gt": {c: X.gt_desc(c) for c in matrix},
             "coverage": {"with_trace": sum(1 for t in _tax().values() if t.get("funnel")),
-                         "runs": len(_tax())}}
+                         "runs": len(_tax()), "unscored": len(_unscored()),
+                         "planes": {p: sum(1 for r in _TAX["by_ref"].values() if r.plane == p)
+                                    for p in ("evals", "prod0")}}}
 
 
 def _chat_context(invs: list[str]) -> str:
@@ -493,11 +519,13 @@ def _chat_context(invs: list[str]) -> str:
            "to verify before claiming a fact was or was not in the evidence."]
     for p in ps:
         run = p["run"] or {}
-        out.append(f"\n=== {p['timeline']['investigation_id']} | case {p['case_id']} | "
+        out.append(f"\n=== {p['ref']} | case {p['case_id'] or 'none (no ground truth)'} | "
                    f"{'PASS' if run.get('passed') else 'FAIL'} score {run.get('composite')} | "
                    f"model {run.get('model')} | taxonomy bucket {run.get('tax') or '-'} "
                    f"({(X.BUCKETS.get(run.get('tax') or '', ('',))[0])})")
-        out.append(f"GROUND TRUTH: {p['gt']['description']} (terms: {', '.join(p['gt']['terms'])})")
+        out.append(f"GROUND TRUTH: {p['gt']['description']} (terms: {', '.join(p['gt']['terms'])})"
+                   if p["gt"]["description"] else "GROUND TRUTH: unknown for this investigation "
+                   "(production alert or unscored run); judge the reasoning on its own evidence.")
         if p["judge"]:
             out.append("Judge sub-questions failed: " + " | ".join(
                 f"{j.get('question_id')}: {str(j.get('evidence'))[:200]}" for j in p["judge"][:6]))
@@ -600,9 +628,9 @@ class Handler(BaseHTTPRequestHandler):
         one = lambda k: (q.get(k) or [""])[0].strip()
         try:
             if path == "/api/v1/evalanalysis/timeline":
-                return self.ok(_inv_payload(one("investigation_id")))
+                return self.ok(_inv_payload(one("ref") or one("investigation_id")))
             if path == "/api/v1/evalanalysis/partners":
-                return self.ok({"partners": _partners(one("investigation_id"))})
+                return self.ok({"partners": _partners(one("ref") or one("investigation_id"))})
             if path == "/api/v1/evalanalysis/compare_traces":
                 return self.ok(_compare(one("a"), one("b")))
         except Exception as e:
@@ -662,13 +690,35 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(422, {"error": "messages or prompt required"})
             try:
                 ctx = payload.get("context") or {}
-                return self.ok(run_chat(msgs, invs=ctx.get("investigation_ids") or []))
+                return self.ok(run_chat(msgs, invs=ctx.get("refs") or ctx.get("investigation_ids") or []))
             except Exception as e:
                 return self.reply(502, {"error": f"chat failed: {e}"})
         self.reply(404, {"error": "Endpoint not found"})
 
 
+SYNC_EVERY = int(os.environ.get("EVAL_PROD0_SYNC_S", "1800"))
+
+
+def _sync_loop():
+    """Keep prod0 current: campaigns, the investigation index and MLflow ids, then extract only
+    traces not yet cached. Two workers, so a live prod0 investigation is never crowded."""
+    import threading, time
+
+    def run():
+        while True:
+            time.sleep(SYNC_EVERY)
+            try:
+                res = P0.sync_all()
+                X.build(workers=2)
+                print(f"prod0 sync: {json.dumps(res)}", file=sys.stderr)
+            except Exception as e:
+                print(f"prod0 sync failed: {e}", file=sys.stderr)
+    if SYNC_EVERY > 0:
+        threading.Thread(target=run, daemon=True).start()
+
+
 if __name__ == "__main__":
+    _sync_loop()
     cases = A.contrastable_cases()
     print(f"eval-analysis on :{PORT}  "
           f"{len(cases)} contrastable cases, "
