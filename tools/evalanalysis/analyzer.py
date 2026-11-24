@@ -97,6 +97,7 @@ class RunView:
     distractors_hit: list[str] = field(default_factory=list)
     failing_subquestions: list[dict] = field(default_factory=list)
     bucket: str = ""                        # the failure bucket, "" when passed
+    stage: str = ""                         # judge-derived failing stage; needs no curated GT
 
 
 def _bucket(v: RunView, gt: dict | None) -> str:
@@ -115,6 +116,19 @@ def _bucket(v: RunView, gt: dict | None) -> str:
     if not v.summary_names_gt:
         return "NOT_NAMED"                   # GT never reached the summary (→ A or B via trace)
     return "CD_NAMED_BUT_FAILED"             # named it, still scored fail → ranking or reporter
+
+
+def _stage(v: "RunView") -> str:
+    """Which judge dimension sank the run. Works for every scored run, GT map or not."""
+    if v.passed:
+        return ""
+    if v.d1 < 0.5:
+        return "LOCALIZATION"        # wrong or no component
+    if v.d2 < 0.5:
+        return "CHARACTERIZATION"    # right component, wrong mechanism
+    if v.d3 < 0.5:
+        return "SCOPE"               # right cause, wrong blast radius
+    return "MARGINAL"                # no single dimension collapsed; composite under threshold
 
 
 def load_runs(case_id: str | None = None, model: str | None = None) -> list[RunView]:
@@ -157,6 +171,7 @@ def load_runs(case_id: str | None = None, model: str | None = None) -> list[RunV
                                   if not q_["answer"]],
         )
         v.bucket = _bucket(v, gt)
+        v.stage = _stage(v)
         out.append(v)
     return out
 

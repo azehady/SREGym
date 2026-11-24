@@ -241,6 +241,58 @@ document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter'
 </script></body></html>"""
 
 
+def _row(r, full: bool = False) -> dict:
+    d = {"run_id": r.run_id, "investigation_id": r.investigation_id, "case_id": r.case_id,
+         "model": (r.model or "unknown").split("/")[-1], "passed": r.passed,
+         "composite": round(r.composite, 2), "d1": round(r.d1, 2), "d2": round(r.d2, 2),
+         "d3": round(r.d3, 2), "stage": r.stage, "bucket": r.bucket,
+         "names_gt": r.summary_names_gt, "bp": r.bp_id, "created_at": r.created_at[:16]}
+    if full:  # training/export record: what the judge said was missed, and the cached reads
+        d["failing_subquestions"] = r.failing_subquestions
+        d["ground_truth"] = A.GROUND_TRUTH.get(r.case_id, {}).get("component")
+        got = _READS.get(r.investigation_id or "")
+        d["reads"] = got[0] if got else None
+    return d
+
+
+try:
+    _READS = json.loads(open(FD.READS).read())
+except Exception:
+    _READS = {}
+
+
+def _history(q: dict, full: bool = False) -> list[dict]:
+    """Every scored run, newest first, with optional case/model/stage/outcome filters."""
+    one = lambda k: (q.get(k) or [""])[0]
+    runs = A.load_runs(one("case_id") or None)
+    out = []
+    for r in runs:
+        row = _row(r, full)
+        if one("model") and row["model"] != one("model"):
+            continue
+        if one("stage") and row["stage"] != one("stage"):
+            continue
+        if one("outcome") == "pass" and not r.passed or one("outcome") == "fail" and r.passed:
+            continue
+        out.append(row)
+    return sorted(out, key=lambda x: x["created_at"], reverse=True)
+
+
+def _taxonomy() -> dict:
+    """Failing runs grouped by stage, with a case x stage matrix and each stage's members."""
+    stages: dict[str, list] = {}
+    matrix: dict[str, dict] = {}
+    for r in A.load_runs():
+        m = matrix.setdefault(r.case_id, {"pass": 0, "fail": 0})
+        m["pass" if r.passed else "fail"] += 1
+        if r.passed:
+            continue
+        m[r.stage] = m.get(r.stage, 0) + 1
+        stages.setdefault(r.stage, []).append(_row(r))
+    return {"stages": {k: sorted(v, key=lambda x: x["created_at"], reverse=True)
+                       for k, v in stages.items()}, "matrix": matrix}
+
+
 def run_chat(messages: list[dict], rounds: int = 5) -> dict:
     """Drive a short tool-use loop against litellm and return the final answer plus a trace."""
     convo = [{"role": "system", "content": SYSTEM}, *messages]
@@ -315,6 +367,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.ok({"cases": A.contrastable_cases()})
         if path == "/api/v1/evalanalysis/findings":
             return self.ok(FD.load())
+        if path == "/api/v1/evalanalysis/history":
+            return self.ok({"runs": _history(q)})
+        if path == "/api/v1/evalanalysis/taxonomy":
+            return self.ok(_taxonomy())
+        if path == "/api/v1/evalanalysis/export":
+            body = "\n".join(json.dumps(r) for r in _history({}, full=True)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Disposition", "attachment; filename=rca-eval-runs.jsonl")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if path == "/api/v1/evalanalysis/case":
             case = (q.get("case_id") or [""])[0]
             return self.ok({"summary": A.case_summary(case),
@@ -343,7 +407,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, {"error": "Endpoint not found"})
 
     def _page(self):
-        html = DASHBOARD_HTML.encode()
+        page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
+        html = open(page, "rb").read() if os.path.exists(page) else DASHBOARD_HTML.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html)))
