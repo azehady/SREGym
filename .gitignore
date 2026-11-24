@@ -258,3 +258,5 @@ tools/evalanalysis/prod0_evals.sqlite3
 tools/evalanalysis/prod0_investigations.json
 tools/evalanalysis/mlflow_map.json
 tools/evalanalysis/gt_catalog.json
+tools/evalanalysis/report_cache/
+tools/evalanalysis/report_grades.json

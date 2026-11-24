@@ -36,6 +36,14 @@
  .idc{display:flex;flex-direction:column;gap:1px}.idc .top{display:flex;align-items:center}
  .plane{font:600 .6rem var(--mono);letter-spacing:.06em;color:var(--faint);text-transform:uppercase}.plane.prod0{color:var(--amber)}
  .pil.nogt{background:#23272e;color:var(--mut)}
+ .rpt{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+ .rpt h3{margin:4px 0 6px;font-size:.98rem;line-height:1.35}.rpt .conf{font:600 .72rem var(--mono);color:var(--mut)}
+ .chk{display:grid;grid-template-columns:18px 1fr;gap:2px 8px;font-size:.8rem;margin:8px 0}.chk .y{color:var(--green)}.chk .n{color:var(--red)}.chk .d{grid-column:2;color:var(--faint);font-size:.74rem;margin-bottom:3px;overflow-wrap:anywhere}
+ .score{font:700 .8rem var(--mono);padding:2px 8px;border-radius:12px;background:#23272e}
+ .blind{background:#3a1a17;color:var(--red);font:700 .66rem var(--mono);padding:2px 7px;border-radius:4px;letter-spacing:.04em}
+ svg.topo{width:100%;height:auto;background:#171a1f;border:1px solid var(--line);border-radius:7px}
+ svg.topo text{font-family:var(--mono)}.lgd{display:flex;gap:14px;flex-wrap:wrap;font-size:.72rem;color:var(--mut);margin:4px 0 8px}
+ .lgd i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
  .flag{font:.62rem var(--mono);color:var(--faint);margin-left:4px}
  .stats{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:6px}.stat b{display:block;font-size:1.5rem;font-variant-numeric:tabular-nums}.stat span{color:var(--mut);font-size:.78rem}
  .tbar{display:flex;gap:2px;margin:8px 0 12px}.tbar button{border:0;padding:0;cursor:pointer;min-width:26px;background:none}.tbar .bk{display:block;border-radius:0;padding:7px 4px}
@@ -195,7 +203,20 @@ VIEWS.overview=async()=>{const el=$('overview'); if(el.dataset.done)return;
    `<div class="ov"><div class="ovh">Cases that fail most</div><div class="hint">"Loses the fact at" is the first layer where passing runs carry the ground-truth fact and failing runs don't (a gap of 30 points or more).</div>`+
    `<div class="scroll"><table class="f"><tr><th>case and its ground truth</th><th>passed</th><th>main buckets</th><th>loses the fact at</th><th></th></tr>${cases}</table></div></div>`+
    `<div class="ov"><div class="ovh">By model (5+ runs) — click for its investigations</div><div class="scroll"><table class="f"><tr><th>model</th><th>passed</th><th>failure buckets</th></tr>${models}</table></div></div>`;
-  el.dataset.done=1}catch(e){el.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
+  el.dataset.done=1; overviewReports(el)}catch(e){el.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
+async function overviewReports(el){try{const r=await get('/reports_summary'); if(!r.graded)return;
+ const B=['failing','degraded','healthy','no state','not drawn'];
+ const tot=s=>B.reduce((a,b)=>a+((r.belief[b]||{})[s]||0),0), P=tot('pass'), F=tot('fail');
+ const col={failing:'#e0574f',degraded:'#d99a4e',healthy:'#4bb972','no state':'#6b7179','not drawn':'#9aa0a8','no topology':'#2a2f37'};
+ const bar=s=>{const n=tot(s);return `<div class="tbar" style="gap:1px">${B.filter(b=>(r.belief[b]||{})[s]).map(b=>{const v=r.belief[b][s];return `<div title="${b}: ${v}" style="flex:${v};background:${col[b]};height:20px;min-width:3px"></div>`}).join('')}</div>`};
+ const L={drawn:'GT component drawn in topology',faulty:'…shown as faulty',hyp:'a hypothesis involves the GT',hyp_conf:'…and it is confirmed',evidence:'an evidence card shows the GT',conclusion:'conclusion blames it (D1)'};
+ const rows=Object.entries(L).filter(([k])=>r.checks[k]).map(([k,l])=>{const c=r.checks[k],pr=c.pass[1]?Math.round(100*c.pass[0]/c.pass[1]):null,fr=c.fail[1]?Math.round(100*c.fail[0]/c.fail[1]):null;
+  return `<tr><td>${l}</td><td>${pr??'—'}% <span class="hint">(${c.pass[1]})</span></td><td><b>${fr??'—'}%</b> <span class="hint">(${c.fail[1]})</span></td><td>${pr!=null&&fr!=null&&pr-fr>=25?`<span style="color:var(--amber)">▲${pr-fr}</span>`:''}</td></tr>`}).join('');
+ el.insertAdjacentHTML('beforeend',`<div class="ov"><div class="ovh">What the runs' own reports believed about the ground-truth component (${r.graded} reports graded)</div>`+
+  `<div class="hint">Joseph's Reporter draws a topology with a state for every component (newer reports only: ${P+F} of ${r.graded} have one). Graded against ground truth, "healthy" or "not drawn" on the root-cause component means the run looked past it.</div>`+
+  `<div style="display:grid;grid-template-columns:60px 1fr;gap:6px 10px;align-items:center;margin-top:10px"><span class="hint">pass ${P}</span>${bar('pass')}<span class="hint">fail ${F}</span>${bar('fail')}</div>`+
+  `<div class="lgd">${B.map(b=>`<span><i style="background:${col[b]}"></i>${b}</span>`).join('')}</div>`+
+  `<div class="ovh">Which part of the report separates passing from failing runs</div><table class="f"><tr><th>check</th><th>pass</th><th>fail</th><th></th></tr>${rows}</table></div>`)}catch(e){}}
 
 /* history */
 let allRuns=null; const runs=async()=>allRuns||(allRuns=(await get('/history')).runs);
@@ -255,11 +276,42 @@ async function drawMermaid(el,src){try{mermaid.initialize({startOnLoad:false,the
  catch(e){el.innerHTML=`<pre class="src">${esc(src)}</pre>`}}
 function copyText(t,btn){navigator.clipboard.writeText(t).then(()=>{const o=btn.textContent; btn.textContent='Copied'; setTimeout(()=>btn.textContent=o,1400)})}
 
+/* the run's own report (Reporter HTML), graded against ground truth */
+const BEL={bad:'#e0574f',warn:'#d99a4e',ok:'#4bb972'};
+function topoSvg(t){const N=t.nodes||{}, Z=t.zones||[]; let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+ Z.forEach(z=>{x0=Math.min(x0,z.x);y0=Math.min(y0,z.y);x1=Math.max(x1,z.x+z.w);y1=Math.max(y1,z.y+z.h)});
+ Object.values(N).forEach(n=>{x0=Math.min(x0,n.x-n.w/2);y0=Math.min(y0,n.y-n.h/2-14);x1=Math.max(x1,n.x+n.w/2);y1=Math.max(y1,n.y+n.h/2+18)});
+ let h=`<svg class="topo" viewBox="${x0-10} ${y0-10} ${x1-x0+20} ${y1-y0+20}" role="img" aria-label="Report topology">`;
+ Z.forEach(z=>h+=`<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="8" fill="none" stroke="#2a2f37" stroke-dasharray="${z.k==='ns'?'4 4':''}"/><text x="${z.x+8}" y="${z.y+14}" font-size="10" fill="#6b7179">${esc(z.label)}</text>`);
+ (t.links||[]).forEach(l=>{const a=N[l.a],b=N[l.b]; if(a&&b)h+=`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#3a404a" stroke-width="1.5"/>`});
+ Object.entries(N).forEach(([id,n])=>{const b=(n.belief||[])[0]||'', fill=BEL[b]||'#9aa0a8';
+  h+=`<g><title>${esc(n.label)}: report says ${esc((n.belief||[])[1]||'no state')}. ${esc(n.note||'')}</title>`+
+   `<rect x="${n.x-n.w/2}" y="${n.y-n.h/2}" width="${n.w}" height="${n.h}" rx="6" fill="#1c2026" stroke="${fill}" stroke-width="2"/>`+
+   (n.gt?`<rect x="${n.x-n.w/2-5}" y="${n.y-n.h/2-5}" width="${n.w+10}" height="${n.h+10}" rx="9" fill="none" stroke="#4bb972" stroke-width="2" stroke-dasharray="5 3"/><text x="${n.x}" y="${n.y-n.h/2-9}" text-anchor="middle" font-size="10" font-weight="700" fill="#4bb972">GROUND TRUTH</text>`:'')+
+   `<text x="${n.x}" y="${n.y-2}" text-anchor="middle" font-size="12" font-weight="600" fill="#e8e6e0">${esc(n.label)}</text>`+
+   `<text x="${n.x}" y="${n.y+12}" text-anchor="middle" font-size="9" fill="${fill}">${esc(((n.belief||[])[1]||'').slice(0,26))}</text></g>`});
+ return h+'</svg><div class="lgd"><span><i style="background:#e0574f"></i>report: failing</span><span><i style="background:#d99a4e"></i>degraded</span><span><i style="background:#4bb972"></i>healthy</span><span><i style="border:2px dashed #4bb972"></i>actual root cause</span></div>'}
+function reportCard(g){if(!g||g.layout==='none')return '<div class="rpt hint">No report was generated for this investigation.</div>';
+ const gn=(g.gt_nodes||[])[0];
+ let h=`<div class="rpt"><div class="rh"><span class="k">THE RUN'S REPORT</span>${g.has_gt?`<span class="score">${esc(g.score)} checks</span>`:''}${g.blind_spot?'<span class="blind">BLIND SPOT</span>':''}${g.source_url?`<a href="${esc(g.source_url)}" target="_blank" rel="noopener">open report ↗</a>`:''}</div>`+
+  `<h3>${esc(g.headline)}</h3>${g.confidence!=null?`<div class="conf">reporter confidence ${g.confidence}</div>`:''}`;
+ if(g.has_gt)h+=`<div class="chk">${g.checks.map(c=>`<span class="${c.ok?'y':'n'}">${c.ok?'✓':'✗'}</span><span>${esc(c.label)}</span><span class="d">${esc(c.detail)}</span>`).join('')}</div>`;
+ if(g.blind_spot&&gn)h+=`<div class="story" style="margin:8px 0"><b>It looked straight at the root cause.</b> The report draws <b>${esc(gn.label)}</b> and shows it as <b>${esc((gn.belief||[])[1]||'healthy')}</b>${gn.note?`: “${esc(gn.note)}”`:''}.</div>`;
+ if(g.topology)h+=`<div class="ovh">The report's topology: colour = what the run believed, dashed = the actual root cause</div>`+topoSvg(g.topology);
+ if((g.hypotheses||[]).length)h+=`<div class="ovh">The report's hypotheses</div><div class="scroll"><table class="f"><tr><th>hypothesis</th><th>rating</th><th>status</th><th>its evidence</th></tr>`+
+  g.hypotheses.map(x=>`<tr><td class="w">${esc(x.text)}${x.gt?'<span class="tag truth">GROUND TRUTH</span>':''}</td><td>${'★'.repeat(x.stars)}</td><td><span class="st ${esc((x.status||'').toLowerCase())}">${esc(x.status)}</span></td><td class="w hint">${esc(x.evidence)}</td></tr>`).join('')+'</table></div>';
+ if((g.evidence||[]).length)h+=`<div class="ovh">Evidence cards (${g.evidence.filter(e=>e.gt).length} of ${g.evidence.length} show the ground truth)</div>`+
+  g.evidence.map(e=>`<p style="font-size:.8rem;margin:3px 0">${e.gt?'<span class="tag truth">GT</span> ':''}<b>${esc(e.label)}</b> <code class="hint">${esc(e.file)}</code></p>`).join('');
+ if((g.missed_reads||[]).length)h+=`<div class="ovh">Decisive outputs the run read but the report never cites</div>`+
+  g.missed_reads.map(x=>`<p style="font-size:.78rem;margin:3px 0"><code class="g" style="font:.72rem var(--mono);color:var(--green)">${esc(x.target||x.read)}</code> <span class="hint">${esc(x.agent)}</span></p>`).join('');
+ return h+'</div>'}
+async function loadReport(ref,el){try{el.innerHTML=reportCard(await get('/report?ref='+encodeURIComponent(ref)))}catch(e){el.innerHTML=`<div class="rpt err">report: ${esc(e.message)}</div>`}}
+
 /* trace: one investigation */
 VIEWS.trace=async p=>{const out=$('out'); const ref=p.ref||p.inv; if(!ref)return; $('inv').value=ref; CTX=[ref]; setAsk();
  out.innerHTML='<div class="hint">building the timeline… a first load takes 10–30s, then it is cached</div>';
  try{const d=await get('/timeline?ref='+encodeURIComponent(ref)); CTX=[d.ref]; setAsk(); const t=d.timeline, ms=t.milestones, r=d.run||{};
-  let h=`<h2>${head(d)}</h2>`+gtbox(d);
+  let h=`<h2>${head(d)}</h2>`+gtbox(d)+`<div id="rep1" style="margin:12px 0"><div class="hint">grading the run's report…</div></div>`;
   h+=`<div class="ovh">Path of the ground-truth fact through this run${r.tax?` — <span class="bk ${r.tax}">${r.tax}</span> ${esc(TAXN[r.tax])}`:''}</div><div class="lad one">`+
    PATH.map(([k,l])=>`<div>${l}</div><div class="${ms[k]?'y':'n'}">${ms[k]?`round ${ms[k].round} · +${ms[k].t} min`:'never'}</div>`).join('')+`</div>`;
   if(t.summary_mentions_only)h+=`<div class="hint">The summary mentions the ground-truth component, but the judge says it is not blamed as the origin.</div>`;
@@ -268,7 +320,7 @@ VIEWS.trace=async p=>{const out=$('out'); const ref=p.ref||p.inv; if(!ref)return
   h+=`<div class="ovh">Timeline — one card per orchestrator dispatch; green marks contact with the ground truth</div><div class="cols one">${t.rounds.filter(x=>x.n).map(x=>roundCard(x,ms)).join('')||'<div class="hint">No rounds found in this trace.</div>'}</div>`;
   h+=`<div class="ovh">Hypotheses</div>${hypCards(t.hypotheses)}`;
   if(t.final_summary)h+=`<div class="ovh">Final root-cause summary</div><div class="summary">${esc(t.final_summary)}</div>`;
-  out.innerHTML=h}catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
+  out.innerHTML=h; loadReport(d.ref,$('rep1'))}catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
 $('go').onclick=()=>nav('trace',{ref:$('inv').value.trim()}); $('inv').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').onclick()});
 
 /* compare: a run that reached the ground truth vs one that did not */
@@ -294,6 +346,7 @@ VIEWS.compare=async p=>{const out=$('cout'); const R=await runs(); let {a,b}=p; 
   const d=await get(`/compare_traces?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`); const ok=d.ok, bad=d.bad, df=d.diff;
   let h=(d.same_case?'':'<div class="err">These two runs are from different cases; the comparison is not meaningful.</div>')+gtbox(ok);
   h+=`<div class="story"><b>Where the failing run left the path.</b> ${esc(df.story)}</div>`;
+  h+=`<div class="ovh">The two reports, graded against the ground truth</div><div class="cols"><div id="repA"><div class="hint">grading…</div></div><div id="repB"><div class="hint">grading…</div></div></div>`;
   h+=`<div class="ovh">The ground-truth fact, layer by layer</div><div class="lad"><div class="h">layer</div><div class="h">reached GT · ${esc(df.ok)}</div><div class="h">failed · ${esc(df.bad)}</div>`+
    df.rows.map(r=>{const c=m=>m?`<div class="y">round ${m.round} · +${m.t} min</div>`:`<div class="n ${r.layer===df.divergence?'div':''}">never</div>`; return `<div>${esc(r.label)}</div>${c(r.ok)}${c(r.bad)}`}).join('')+`</div>`;
   h+=`<div class="ovh">Diagram <button class="ghost" id="mmcopy" style="margin-left:8px">Copy Mermaid</button></div><div class="mm" id="mmout"></div>`;
@@ -305,7 +358,7 @@ VIEWS.compare=async p=>{const out=$('cout'); const R=await runs(); let {a,b}=p; 
   h+=`<div class="ovh">Round by round</div><div class="cols"><div class="colh">${head(ok)}</div><div class="colh">${head(bad)}</div>${grid}</div>`;
   h+=`<div class="ovh">Hypotheses</div><div class="cols"><div>${hypCards(ok.timeline.hypotheses)}</div><div>${hypCards(bad.timeline.hypotheses)}</div></div>`;
   h+=`<div class="ovh">Final summaries</div><div class="cols"><div class="summary">${esc(ok.timeline.final_summary)}</div><div class="summary">${esc(bad.timeline.final_summary)}</div></div>`;
-  out.innerHTML=h; drawMermaid($('mmout'),df.mermaid); $('mmcopy').onclick=e=>copyText(df.mermaid,e.target);
+  out.innerHTML=h; loadReport(ok.ref,$('repA')); loadReport(bad.ref,$('repB')); drawMermaid($('mmout'),df.mermaid); $('mmcopy').onclick=e=>copyText(df.mermaid,e.target);
  }catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
 $('ccase').onchange=()=>nav('compare',{case:$('ccase').value});
 $('cbad').onchange=()=>nav('compare',{b:$('cbad').value});

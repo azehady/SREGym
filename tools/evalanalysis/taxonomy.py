@@ -94,6 +94,16 @@ def gt_terms(case: str) -> list[str]:
     return (gt_catalog.load().get(case) or {}).get("terms", [])
 
 
+def gt_component(case: str) -> list[str]:
+    """The GT component's own resource names (e.g. valkey-cart), for matching topology nodes."""
+    import re as _re
+    from evalanalysis import gt_catalog
+    comp = (gt_catalog.load().get(case) or {}).get("component", "")
+    comp = comp or (A.GROUND_TRUTH.get(case) or {}).get("component", "")
+    names = [p.split("/")[-1].strip().lower() for p in _re.split(r"[,()]| and ", comp)]
+    return [n for n in names if len(n) > 3 and " " not in n]
+
+
 def gt_desc(case: str) -> str:
     if case in GT_DESC:
         return GT_DESC[case]

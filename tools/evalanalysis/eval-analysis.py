@@ -29,6 +29,7 @@ from evalanalysis import findings as FD  # noqa: E402
 from evalanalysis import taxonomy as X  # noqa: E402
 from evalanalysis import timeline as TL  # noqa: E402
 from evalanalysis import prod0_sync as P0  # noqa: E402
+from evalanalysis import report_grader as RG  # noqa: E402
 
 
 def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
@@ -437,6 +438,47 @@ def _compare(a: str, b: str) -> dict:
     return {"ok": pa, "bad": pb, "diff": diff, "same_case": pa["case_id"] == pb["case_id"]}
 
 
+def _report(ref: str) -> dict:
+    """The run's own HTML report (Reporter-built), every element graded against ground truth."""
+    _tax()
+    ref = _resolve(ref)
+    r = _TAX["by_ref"].get(ref)
+    m = None if r else P0.load_index().get(T.split_ref(ref)[1])
+    case = r.case_id if r else ""
+    rep = RG.parse(RG.fetch(ref, r.project_id if r else (m or {}).get("project_id")))
+    tl = TL.get(ref, X.gt_terms(case), "") if case else None
+    reads = [x for rd in (tl or {}).get("rounds", []) for x in rd["reads"]] if tl else []
+    g = RG.grade(rep, X.gt_terms(case), r.d1 if r else None, r.passed if r else None,
+                 gt_reads=reads, component=X.gt_component(case))
+    g["belief"] = RG.belief_bucket(g)
+    g["has_gt"] = bool(case)
+    g["ref"] = ref
+    plane, inv = T.split_ref(ref)
+    g["source_url"] = _links(ref, r.project_id if r else (m or {}).get("project_id")).get("investigation")
+    return g
+
+
+def _reports_summary() -> dict:
+    """Across graded reports: what did the report believe about the GT component, and which
+    report element separates passing from failing runs."""
+    grades = RG.load_grades()
+    belief: dict = {}
+    checks: dict = {}
+    layouts: dict = {}
+    for ref, g in grades.items():
+        side = "pass" if g.get("passed") else "fail"
+        layouts[g["layout"]] = layouts.get(g["layout"], 0) + 1
+        if g["layout"] in ("none", None):
+            continue
+        b = belief.setdefault(g["belief"], {"pass": 0, "fail": 0})
+        b[side] += 1
+        for k, ok in (g.get("checks") or {}).items():
+            c = checks.setdefault(k, {"pass": [0, 0], "fail": [0, 0]})
+            c[side][0] += bool(ok)
+            c[side][1] += 1
+    return {"belief": belief, "checks": checks, "layouts": layouts, "graded": len(grades)}
+
+
 def _history(q: dict, full: bool = False) -> list[dict]:
     """Every scored run plus unscored prod0 investigations, newest first, with filters."""
     one = lambda k: (q.get(k) or [""])[0]
@@ -631,6 +673,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok(_inv_payload(one("ref") or one("investigation_id")))
             if path == "/api/v1/evalanalysis/partners":
                 return self.ok({"partners": _partners(one("ref") or one("investigation_id"))})
+            if path == "/api/v1/evalanalysis/report":
+                return self.ok(_report(one("ref")))
+            if path == "/api/v1/evalanalysis/reports_summary":
+                return self.ok(_reports_summary())
             if path == "/api/v1/evalanalysis/compare_traces":
                 return self.ok(_compare(one("a"), one("b")))
         except Exception as e:
