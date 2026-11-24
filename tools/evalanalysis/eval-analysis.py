@@ -264,6 +264,62 @@ document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter'
 </script></body></html>"""
 
 
+# Deep links beside every investigation id. evals_gke runs open in the eval observer and (when the
+# trace is still in sleuth's MLflow) in MLflow; kind-plane runs investigated by prod0 open there.
+UI_BASE = os.environ.get("EVAL_UI_BASE", "https://evals-dev.ruffe-bowfin.ts.net:8443")
+UI_PROJECT = os.environ.get("EVAL_UI_PROJECT", "2")
+PROD0_UI = os.environ.get("EVAL_PROD0_UI", "https://prod0.ciroos.ai")
+MLFLOW = os.environ.get("EVAL_MLFLOW", "http://sleuth-service.ciroos.svc.cluster.local:5000")
+MLFLOW_PATH = "/ciroos/dev-tools/mlflow"
+_ML: dict = {"at": 0.0, "map": {}}
+
+
+def _mlflow_map() -> dict:
+    """investigation_id -> (experiment_id, newest trace id), refreshed every 10 minutes."""
+    import time
+    if time.time() - _ML["at"] < 600:
+        return _ML["map"]
+    out: dict[str, tuple] = {}
+    try:
+        token = None
+        for _ in range(40):
+            body = {"locations": [{"type": "MLFLOW_EXPERIMENT",
+                                   "mlflow_experiment": {"experiment_id": "1"}}],
+                    "max_results": 500, "order_by": ["timestamp_ms DESC"]}
+            if token:
+                body["page_token"] = token
+            req = urllib.request.Request(
+                f"{MLFLOW}{MLFLOW_PATH}/ajax-api/3.0/mlflow/traces/search",
+                data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            page = json.loads(urllib.request.urlopen(req, timeout=30).read())
+            for t in page.get("traces") or []:
+                inv = (t.get("tags") or {}).get("investigation_id")
+                if inv and inv not in out:      # newest first, so the first seen wins
+                    exp = t.get("trace_location", {}).get("mlflow_experiment", {}).get("experiment_id", "1")
+                    out[inv] = (exp, t["trace_id"])
+            token = page.get("next_page_token")
+            if not token:
+                break
+    except Exception as e:
+        print(f"mlflow map failed: {e}", file=sys.stderr)
+        if _ML["map"]:
+            return _ML["map"]
+    _ML.update(at=time.time(), map=out)
+    return out
+
+
+def _links(inv: str | None) -> dict:
+    if not inv or not inv.startswith("INV-"):
+        return {}
+    if (X.load_cached().get(inv) or {}).get("source") == "prod0":
+        return {"investigation": f"{PROD0_UI}/investigations/{inv}?projectId={T.PROJECT}",
+                "mlflow": None, "plane": "prod0"}
+    ml = _mlflow_map().get(inv)
+    return {"investigation": f"{UI_BASE}/investigations/{inv}?projectId={UI_PROJECT}",
+            "mlflow": (f"{UI_BASE}{MLFLOW_PATH}/#/experiments/{ml[0]}/traces?workflowType=genai"
+                       f"&traceId={ml[1]}") if ml else None, "plane": "evals"}
+
+
 def _row(r, full: bool = False) -> dict:
     t = _tax().get(r.run_id, {})
     d = {"run_id": r.run_id, "investigation_id": r.investigation_id, "case_id": r.case_id,
@@ -271,7 +327,8 @@ def _row(r, full: bool = False) -> dict:
          "composite": round(r.composite, 2), "d1": round(r.d1, 2), "d2": round(r.d2, 2),
          "d3": round(r.d3, 2), "stage": r.stage, "tax": t.get("primary", ""),
          "flags": t.get("flags", []), "funnel": t.get("funnel"),
-         "names_gt": r.summary_names_gt, "bp": r.bp_id, "created_at": r.created_at[:16]}
+         "names_gt": r.summary_names_gt, "bp": r.bp_id, "created_at": r.created_at[:16],
+         "links": _links(r.investigation_id)}
     if full:  # training/export record: what the judge said was missed, the funnel, and the trace
         d["failing_subquestions"] = r.failing_subquestions
         d["ground_truth"] = X.GT_TERMS.get(r.case_id)

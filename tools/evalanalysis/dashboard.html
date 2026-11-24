@@ -31,6 +31,8 @@
  .bk.A{background:#30181f;color:var(--pink)}.bk.B{background:#3a2c14;color:var(--amber)}.bk.C{background:#2b2140;color:#b49ce0}
  .bk.D{background:#1c2b38;color:var(--blue)}.bk.E{background:#3a1a17;color:var(--red)}.bk.F{background:#2a2f37;color:var(--ink)}
  .bk.G{background:#14312f;color:#5fc9bb}.bk.H{background:#33301a;color:#d6c95a}.bk.N{background:#173a27;color:var(--green)}
+ .xl{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:5px;font:600 .68rem inherit;color:var(--mut);vertical-align:middle;white-space:nowrap}
+ .xl:hover{color:var(--ink);border-color:var(--faint);text-decoration:none}.xl svg{width:12px;height:12px}.xl.off{opacity:.35;cursor:default}
  .flag{font:.62rem var(--mono);color:var(--faint);margin-left:4px}
  .stats{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:6px}.stat b{display:block;font-size:1.5rem;font-variant-numeric:tabular-nums}.stat span{color:var(--mut);font-size:.78rem}
  .tbar{display:flex;gap:2px;margin:8px 0 12px}.tbar button{border:0;padding:0;cursor:pointer;min-width:26px;background:none}.tbar .bk{display:block;border-radius:0;padding:7px 4px}
@@ -143,10 +145,19 @@ function route(){const {v,p}=parse(); const view=VIEWS[v]?v:'overview';
 window.addEventListener('hashchange',route);
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>nav(t.dataset.v));
 
+/* deep links beside every investigation id: the product's investigation page, and its MLflow trace */
+const IC_INV='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-2.2-4.1" fill="none" stroke="#e8834a" stroke-width="2.4" stroke-linecap="round"/><circle cx="12.6" cy="4.2" r="1.3" fill="#f2b28a"/></svg>';
+const IC_ML='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 9.8A5 5 0 0 1 12 5" fill="none" stroke="#3aa6e0" stroke-width="2.2" stroke-linecap="round"/><path d="M12.8 6.2A5 5 0 0 1 4 11" fill="none" stroke="#1f6fb5" stroke-width="2.2" stroke-linecap="round"/></svg>';
+function xlinks(l,labels){if(!l||!l.investigation)return ''; const stop='onclick="event.stopPropagation()" target="_blank" rel="noopener"';
+ const where=l.plane==='prod0'?'prod0':'evals';
+ return `<a class="xl" ${stop} href="${esc(l.investigation)}" title="Open the investigation (${where})">${IC_INV}${labels?'Investigation ':''}↗</a>`+
+  (l.mlflow?`<a class="xl" ${stop} href="${esc(l.mlflow)}" title="Open the MLflow trace">${IC_ML}${labels?'MLflow ':''}↗</a>`
+   :`<span class="xl off" title="${l.plane==='prod0'?'Investigated by prod0; its MLflow is not reachable from here':'No MLflow trace found for this investigation (older traces were purged)'}">${IC_ML}${labels?'MLflow':''}</span>`)}
+
 /* shared rows */
 const outcome=r=>`<span class="pil ${r.passed?'pass':'fail'}">${r.passed?'pass':'fail'}</span>`;
 function runRow(r){const inv=esc(r.investigation_id||'');
- return `<tr class="row" onclick="nav('trace',{inv:'${inv}'})"><td class="c">${inv||esc(r.run_id)}</td>`+
+ return `<tr class="row" onclick="nav('trace',{inv:'${inv}'})"><td class="c">${inv||esc(r.run_id)}${xlinks(r.links)}</td>`+
  `<td class="c">${short(r.case_id)}</td><td>${esc(r.model)}</td><td>${outcome(r)}</td><td>${r.composite}</td><td>${r.d1} / ${r.d2} / ${r.d3}</td>`+
  `<td>${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax]||'')}">${r.tax}</span>`:''}${(r.flags||[]).filter(f=>f!==r.tax).map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</td><td>${strip(r.funnel)}</td>`+
  `<td>${!r.passed&&r.funnel?`<a href="#compare?b=${inv}" onclick="event.stopPropagation()">vs a pass</a>`:''}</td><td class="c">${esc(r.created_at)}</td></tr>`}
@@ -228,7 +239,7 @@ function hypCards(hs){if(!hs.length)return '<div class="hint">No hypothesis boar
   let cls='hyp'; if(y.gt&&conf)cls+=' gt-conf'; else if(y.gt&&rej)cls+=' gt-rej'; else if(conf)cls+=' conf';
   const tag=y.gt?'<span class="tag truth">GROUND TRUTH</span>':conf?'<span class="tag distractor">CONFIRMED, NOT THE CAUSE</span>':'';
   return `<div class="${cls}">${y.traj.map(s=>`<span class="st ${s}">${s}</span>`).join(' → ')}${tag}<div style="margin-top:5px">${esc(y.text)}</div>${y.reason?`<div class="reason">${esc(y.reason)}</div>`:''}</div>`}).join('')}
-const head=p=>{const r=p.run||{}, t=p.timeline.totals||{}; return `<a href="#trace?inv=${esc(p.timeline.investigation_id)}">${esc(p.timeline.investigation_id)}</a> ${r.run_id?outcome(r):''} ${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax])}">${r.tax}</span>`:''} <span class="hint">${esc(r.model||'')} · score ${r.composite??'—'} · ${t.rounds||0} rounds · ${t.reads||0} reads</span>`};
+const head=p=>{const r=p.run||{}, t=p.timeline.totals||{}; return `<a href="#trace?inv=${esc(p.timeline.investigation_id)}">${esc(p.timeline.investigation_id)}</a>${xlinks(r.links,true)} ${r.run_id?outcome(r):''} ${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax])}">${r.tax}</span>`:''} <span class="hint">${esc(r.model||'')} · score ${r.composite??'—'} · ${t.rounds||0} rounds · ${t.reads||0} reads</span>`};
 const gtbox=p=>p.gt.description?`<div class="gtbox"><span class="k">GROUND TRUTH · ${esc(short(p.case_id))}</span><br>${esc(p.gt.description)}</div>`:'';
 const judge=p=>(p.judge||[]).length?`<div class="ovh">What the judge says the failing run missed</div>`+p.judge.slice(0,6).map(j=>`<p style="font-size:.84rem;margin:4px 0"><span class="pil">${esc(j.id||j.question_id||j.dim)}</span>${esc(j.evidence)}</p>`).join(''):'';
 async function drawMermaid(el,src){try{mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'strict'}); const {svg}=await mermaid.render('mm'+Date.now(),src); el.innerHTML=svg}
