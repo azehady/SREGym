@@ -252,3 +252,4 @@ docker/agents/build-context/
 resolve-values.yaml
 tools/evalanalysis/findings_cache.json
 tools/evalanalysis/reads_cache.json
+tools/evalanalysis/features_cache.json

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evalanalysis import analyzer as A  # noqa: E402
 from evalanalysis import trace_analyzer as T  # noqa: E402
 from evalanalysis import findings as FD  # noqa: E402
+from evalanalysis import taxonomy as X  # noqa: E402
 
 
 def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]:
@@ -38,8 +39,8 @@ def _gt_for_investigation(inv: str, override: str = "") -> tuple[list[str], str]
         c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
         row = c.execute("select case_id from eval_runs where investigation_id=? limit 1",
                         (inv,)).fetchone()
-        if row and row[0] in A.GROUND_TRUTH:
-            return A.GROUND_TRUTH[row[0]]["terms"], row[0]
+        if row and row[0] in X.GT_TERMS:
+            return X.GT_TERMS[row[0]], row[0]
         return [], (row[0] if row else "")
     except Exception:
         return [], ""
@@ -242,23 +243,55 @@ document.getElementById('inv').addEventListener('keydown',e=>{if(e.key==='Enter'
 
 
 def _row(r, full: bool = False) -> dict:
+    t = _tax().get(r.run_id, {})
     d = {"run_id": r.run_id, "investigation_id": r.investigation_id, "case_id": r.case_id,
          "model": (r.model or "unknown").split("/")[-1], "passed": r.passed,
          "composite": round(r.composite, 2), "d1": round(r.d1, 2), "d2": round(r.d2, 2),
-         "d3": round(r.d3, 2), "stage": r.stage, "bucket": r.bucket,
+         "d3": round(r.d3, 2), "stage": r.stage, "tax": t.get("primary", ""),
+         "flags": t.get("flags", []), "funnel": t.get("funnel"),
          "names_gt": r.summary_names_gt, "bp": r.bp_id, "created_at": r.created_at[:16]}
-    if full:  # training/export record: what the judge said was missed, and the cached reads
+    if full:  # training/export record: what the judge said was missed, the funnel, and the trace
         d["failing_subquestions"] = r.failing_subquestions
-        d["ground_truth"] = A.GROUND_TRUTH.get(r.case_id, {}).get("component")
-        got = _READS.get(r.investigation_id or "")
-        d["reads"] = got[0] if got else None
+        d["ground_truth"] = X.GT_TERMS.get(r.case_id)
+        d["artifacts"] = t.get("artifacts", [])
+        f = X.load_cached().get(r.investigation_id or "") or {}
+        d["reads"] = f.get("reads")
+        d["hypotheses"] = f.get("hyps")
+        d["picked_bp"] = f.get("bp")
     return d
 
 
-try:
-    _READS = json.loads(open(FD.READS).read())
-except Exception:
-    _READS = {}
+_TAX: dict = {"mtime": None, "runs": {}}
+
+
+def _tax() -> dict:
+    """run_id -> A–H classification; recomputed when features_cache.json changes."""
+    try:
+        mt = os.path.getmtime(X.FEATURES)
+    except OSError:
+        mt = 0
+    if _TAX["mtime"] == mt:
+        return _TAX["runs"]
+    import sqlite3
+    c = sqlite3.connect(f"file:{A.DB}?mode=ro", uri=True)
+    meta = {rid: (rca, st) for rid, rca, st in c.execute(
+        "select id, rca_json, investigation_status from eval_runs")}
+    try:
+        types = json.load(open(os.path.expanduser(
+            "~/ciroos/eval-runs/bp-ab/taxonomy.json")))["cases"]
+    except Exception:
+        types = {}
+    feats = X.load_cached(force=True)
+    out = {}
+    for r in A.load_runs():
+        rca, st = meta.get(r.run_id, (None, None))
+        out[r.run_id] = X.classify(r, feats.get(r.investigation_id or ""),
+                                   (types.get(r.case_id) or {}).get("type", ""),
+                                   A._summary_text(rca), st or "COMPLETED")
+    _TAX.update(mtime=mt, runs=out)
+    return out
+
+
 
 
 def _history(q: dict, full: bool = False) -> list[dict]:
@@ -272,6 +305,8 @@ def _history(q: dict, full: bool = False) -> list[dict]:
             continue
         if one("stage") and row["stage"] != one("stage"):
             continue
+        if one("tax") and row["tax"] != one("tax"):
+            continue
         if one("outcome") == "pass" and not r.passed or one("outcome") == "fail" and r.passed:
             continue
         out.append(row)
@@ -279,18 +314,38 @@ def _history(q: dict, full: bool = False) -> list[dict]:
 
 
 def _taxonomy() -> dict:
-    """Failing runs grouped by stage, with a case x stage matrix and each stage's members."""
-    stages: dict[str, list] = {}
+    """A–H: failing runs by primary bucket, a case x bucket matrix, and the funnel per bucket."""
+    buckets: dict[str, list] = {}
     matrix: dict[str, dict] = {}
+    recall: dict[str, list] = {}
     for r in A.load_runs():
+        row = _row(r)
         m = matrix.setdefault(r.case_id, {"pass": 0, "fail": 0})
         m["pass" if r.passed else "fail"] += 1
-        if r.passed:
+        if r.passed:   # null test: do passing summaries actually contain the GT terms?
+            if row["funnel"]:
+                recall.setdefault(r.case_id, []).append(row["funnel"]["summary"])
             continue
-        m[r.stage] = m.get(r.stage, 0) + 1
-        stages.setdefault(r.stage, []).append(_row(r))
-    return {"stages": {k: sorted(v, key=lambda x: x["created_at"], reverse=True)
-                       for k, v in stages.items()}, "matrix": matrix}
+        b = row["tax"] or "?"
+        m[b] = m.get(b, 0) + 1
+        buckets.setdefault(b, []).append(row)
+    for cid, v in recall.items():
+        matrix[cid]["term_recall"] = round(100 * sum(v) / len(v))
+    layers = ("outputs", "ledger", "hypothesis", "confirmed", "summary")
+    sep: dict[str, dict] = {}
+    for r in A.load_runs():
+        f = _tax().get(r.run_id, {}).get("funnel")
+        if not f:
+            continue
+        side = sep.setdefault(r.case_id, {"pass": [], "fail": []})["pass" if r.passed else "fail"]
+        side.append(f)
+    funnel = {cid: {k: {"n": len(v), **{l: round(100 * sum(f[l] for f in v) / len(v)) for l in layers}}
+                    for k, v in d.items() if v} for cid, d in sep.items()}
+    return {"buckets": {k: sorted(v, key=lambda x: x["created_at"], reverse=True)
+                        for k, v in buckets.items()},
+            "matrix": matrix, "defs": X.BUCKETS, "funnel": funnel,
+            "coverage": {"with_trace": sum(1 for t in _tax().values() if t.get("funnel")),
+                         "runs": len(_tax())}}
 
 
 def run_chat(messages: list[dict], rounds: int = 5) -> dict:
@@ -400,7 +455,10 @@ class Handler(BaseHTTPRequestHandler):
                 view = T.analyze_investigation(inv, terms)
             except Exception as e:
                 return self.reply(502, {"error": f"trace fetch/parse failed: {e}"})
-            return self.ok({"case_id": case, **T.as_dict(view)})
+            runs = [r for r in A.load_runs(case or None) if r.investigation_id == inv]
+            tax = _tax().get(runs[0].run_id, {}) if runs else {}
+            return self.ok({"case_id": case, "tax": tax,
+                            "fail_terms": X.GT_TERMS.get(case, []), **T.as_dict(view)})
         if path in ("", "/dashboard", "/eval-analysis", "/api/v1/evalanalysis",
                     "/api/v1/evalanalysis/dashboard"):
             return self._page()

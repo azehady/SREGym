@@ -1,0 +1,178 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RCA Trace Analysis</title>
+<style>
+ :root{--bg:#14171b;--panel:#1c2026;--line:#2a2f37;--ink:#e8e6e0;--mut:#9aa0a8;--faint:#6b7179;
+  --green:#4bb972;--red:#e0574f;--amber:#d99a4e;--blue:#6ea8d8;--pink:#e07a9a;--mono:ui-monospace,Menlo,Consolas,monospace}
+ *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+ .wrap{max-width:1180px;margin:0 auto;padding:22px 20px 80px}
+ h1{font-size:1.3rem;margin:0 0 4px}.sub{color:var(--mut);font-size:.85rem;margin-bottom:14px}
+ .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px;flex-wrap:wrap}
+ .tab{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);padding:9px 14px;font:600 .9rem inherit;cursor:pointer}
+ .tab.on{color:var(--ink);border-bottom-color:var(--blue)}
+ .view{display:none}.view.on{display:block}
+ .bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+ input,select{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:8px 10px;font:13px var(--mono)}
+ button.go{background:var(--blue);color:#0b0e11;border:0;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer}
+ a.dl{color:var(--blue);font-size:.8rem;margin-left:auto}
+ .ov{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:18px}
+ .ovh{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:16px 0 4px}
+ .scroll{overflow-x:auto}
+ table.f{border-collapse:collapse;width:100%;font-size:.82rem;margin:6px 0 14px}
+ table.f th{font-family:var(--mono);font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+ table.f td{padding:6px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;white-space:nowrap}
+ table.f td.c{font-family:var(--mono);color:var(--mut)}tr.row{cursor:pointer}tr.row:hover td{background:#20252c}
+ .pil{display:inline-block;font-family:var(--mono);font-size:.68rem;padding:1px 6px;border-radius:4px;margin:1px 3px 1px 0;background:#23272e;color:var(--mut)}
+ .pil.E,.pil.LOCALIZATION{background:#30181f;color:var(--pink)}.pil.CD,.pil.CHARACTERIZATION{background:#3a2c14;color:var(--amber)}
+ .pil.NOT,.pil.SCOPE{background:#1c2b38;color:var(--blue)}.pil.pass{background:#173a27;color:var(--green)}.pil.fail{background:#3a1a17;color:var(--red)}
+ .badge{display:inline-block;padding:3px 11px;border-radius:20px;font-size:.78rem;font-weight:700}
+ .SOLVED{background:#173a27;color:var(--green)}.REJECTED_TRUTH{background:#3a1a17;color:var(--red)}
+ .NEVER_HYPOTHESIZED{background:#30181f;color:var(--pink)}.WRONG_CONCLUSION{background:#3a2c14;color:var(--amber)}
+ .UNRESOLVED,.UNKNOWN_NO_GT{background:#23272e;color:var(--mut)}
+ .meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--mut);font-size:.82rem;font-family:var(--mono);margin:6px 0 14px}
+ .hyp{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:7px;padding:12px 14px;margin-bottom:10px}
+ .hyp.gt-conf{border-left-color:var(--green)}.hyp.gt-rej{border-left-color:var(--red)}.hyp.conf{border-left-color:var(--amber)}
+ .hrow{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.hid{font-family:var(--mono);font-size:.75rem;color:var(--faint)}
+ .st{padding:2px 7px;border-radius:4px;background:#23272e;color:var(--mut);font-family:var(--mono);font-size:.72rem}
+ .st.confirmed{background:#173a27;color:var(--green)}.st.rejected,.st.refuted{background:#3a1a17;color:var(--red)}.st.investigating{background:#1c2b38;color:var(--blue)}
+ .tag{font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:4px}.tag.truth{background:#173a27;color:var(--green)}.tag.distractor{background:#30181f;color:var(--pink)}
+ .htext{margin:7px 0 0;font-size:.92rem}.reason{margin:6px 0 0;font-size:.82rem;color:var(--mut);font-style:italic}
+ .reads{display:flex;flex-wrap:wrap;gap:3px}.rd{font-family:var(--mono);font-size:.66rem;padding:2px 5px;border-radius:3px;background:#23272e;color:var(--faint)}
+ .rd.gt{background:#173a27;color:var(--green);font-weight:700}
+ .summary{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:14px;font-size:.88rem;color:var(--mut);white-space:pre-wrap;max-height:240px;overflow:auto}
+ .err{color:var(--red);font-family:var(--mono);font-size:.85rem}.hint{color:var(--faint);font-size:.8rem}
+ .bk{display:inline-block;min-width:22px;text-align:center;font:700 .72rem var(--mono);padding:2px 6px;border-radius:4px;background:#23272e;color:var(--mut)}
+ .bk.A{background:#30181f;color:var(--pink)}.bk.B{background:#3a2c14;color:var(--amber)}.bk.C{background:#2b2140;color:#b49ce0}
+ .bk.D{background:#1c2b38;color:var(--blue)}.bk.E{background:#3a1a17;color:var(--red)}.bk.F{background:#2a2f37;color:var(--ink)}
+ .bk.G{background:#14312f;color:#5fc9bb}.bk.H{background:#33301a;color:#d6c95a}.bk.N{background:#173a27;color:var(--green)}
+ .flag{font:.62rem var(--mono);color:var(--faint);margin-left:4px}
+ .funnel{display:flex;gap:0;margin:8px 0 14px;flex-wrap:wrap}.fn{padding:7px 12px;font:600 .75rem var(--mono);border:1px solid var(--line);margin-right:-1px}
+ .fn.y{background:#173a27;color:var(--green)}.fn.n{background:#3a1a17;color:var(--red)}.fn:first-child{border-radius:6px 0 0 6px}.fn:last-child{border-radius:0 6px 6px 0}
+ .defs{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px 18px;margin:10px 0}
+ .defs div{font-size:.8rem;color:var(--mut)}.defs b{color:var(--ink)}
+ details{background:var(--panel);border:1px solid var(--line);border-radius:7px;margin-bottom:8px;padding:8px 12px}summary{cursor:pointer;font-weight:600}
+</style></head><body><div class="wrap">
+ <h1>RCA Trace Analysis</h1>
+ <div class="sub">Eval investigations with ground truth: where the orchestrator's thinking goes shallow or gets misled.</div>
+ <div class="tabs">
+  <button class="tab on" data-v="overview">Overview</button>
+  <button class="tab" data-v="history">History</button>
+  <button class="tab" data-v="taxonomy">Failure taxonomy</button>
+  <button class="tab" data-v="trace">Trace</button>
+ </div>
+ <div id="overview" class="view on"></div>
+ <div id="history" class="view">
+  <div class="bar">
+   <select id="fcase"><option value="">all cases</option></select>
+   <select id="fmodel"><option value="">all models</option></select>
+   <select id="fout"><option value="">pass + fail</option><option value="fail">fail</option><option value="pass">pass</option></select>
+   <select id="ftax"><option value="">any taxonomy</option><option value="A">A never gathered</option><option value="B">B not surfaced</option><option value="C">C mis-ranked</option><option value="D">D lost in reporter</option><option value="E">E distractor</option><option value="F">F tool failure</option><option value="G">G BP misdirection</option><option value="H">H budget</option><option value="N">N named, incomplete</option></select>
+   <span id="hcount" class="hint"></span>
+   <a class="dl" href="/api/v1/evalanalysis/export">export JSONL (training records)</a>
+  </div>
+  <div class="scroll"><table class="f" id="htable"></table></div>
+ </div>
+ <div id="taxonomy" class="view"></div>
+ <div id="trace" class="view">
+  <div class="bar">
+   <input id="inv" placeholder="INV-0000002349" style="flex:1;min-width:180px">
+   <input id="gt" placeholder="ground-truth terms (comma-sep); blank for eval cases" style="flex:2;min-width:160px">
+   <button class="go" id="go">Analyze</button>
+  </div>
+  <div id="out"><div class="hint">Pick a row in History or Failure taxonomy, or enter an investigation id.</div></div>
+ </div>
+</div>
+<script>
+const API='/api/v1/evalanalysis', $=id=>document.getElementById(id);
+const esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const short=c=>c.split('_').slice(0,3).join('_');
+const get=async p=>{const j=await (await fetch(API+p)).json(); if(j.status!=='success')throw new Error(j.error||'failed'); return j.data};
+function show(v){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
+ document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.id===v));
+ if(v==='history'&&!histLoaded)loadHistory(); if(v==='taxonomy'&&!taxLoaded)loadTaxonomy()}
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>show(t.dataset.v));
+function openTrace(inv){if(!inv||!inv.startsWith('INV-'))return; $('inv').value=inv; $('gt').value=''; show('trace'); go()}
+const outcome=r=>`<span class="pil ${r.passed?'pass':'fail'}">${r.passed?'pass':'fail'}</span>`;
+function runRow(r){return `<tr class="row" onclick="openTrace('${esc(r.investigation_id||'')}')"><td class="c">${esc(r.investigation_id||r.run_id)}</td>`+
+ `<td class="c">${short(r.case_id)}</td><td>${esc(r.model)}</td><td>${outcome(r)}</td><td>${r.composite}</td><td>${r.d1} / ${r.d2} / ${r.d3}</td>`+
+ `<td>${r.tax?`<span class="bk ${r.tax}" title="${esc((TAXN[r.tax]||[])[0]||'')}">${r.tax}</span>`:''}${(r.flags||[]).filter(f=>f!==r.tax).map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</td><td>${strip(r.funnel)}</td><td class="c">${esc(r.created_at)}</td></tr>`}
+const TAXN={A:['Evidence never gathered'],B:['Gathered, not surfaced'],C:['Surfaced, mis-ranked'],D:['Lost in the reporter'],E:['Distractor capture'],F:['Tool / capability failure'],G:['BP misdirection'],H:['Budget exhaustion'],N:['Named, judged incomplete']};
+const LAYERS=['outputs','ledger','hypothesis','confirmed','summary'];
+const strip=f=>f?`<span title="tool outputs → agent findings → hypothesis → confirmed → summary">${LAYERS.map(k=>`<span style="color:${f[k]?'var(--green)':'var(--red)'}">${f[k]?'●':'○'}</span>`).join('')}</span>`:'<span class="hint">no trace</span>';
+const RUNHEAD='<tr><th>investigation</th><th>case</th><th>model</th><th>result</th><th>score</th><th>D1 / D2 / D3</th><th>A–H</th><th>funnel</th><th>when</th></tr>';
+
+async function loadOverview(){const el=$('overview');
+ try{const d=await get('/findings'); if(!d.built_at){el.innerHTML='<div class="ov hint">No cached findings yet.</div>';return}
+  const m={E_DISTRACTOR_CAPTURE:'E',CD_NAMED_BUT_FAILED:'CD',NOT_NAMED:'NOT'}; let a='',b='';
+  for(const [cid,v] of Object.entries(d.cases)){const s=v.summary,p=v.reading_chain.pass,f=v.reading_chain.fail;
+   a+=`<tr><td class="c">${short(cid)}</td><td>${s.passed}/${s.n}</td><td>${Object.entries(s.failure_buckets).map(([k,n])=>`<span class="pil ${m[k]||''}">${m[k]||k} ${n}</span>`).join('')}</td></tr>`;
+   b+=`<tr><td class="c">${short(cid)}</td><td>${p.reads} / ${f.reads}</td><td>${p.distinct} / ${f.distinct}</td><td>${p.touched_gt_pct}% / <b>${f.touched_gt_pct}%</b></td></tr>`}
+  el.innerHTML=`<div class="ov"><div>${esc(d.headline)}</div><div class="ovh">Failure buckets per case</div><table class="f"><tr><th>case</th><th>pass</th><th>fail buckets</th></tr>${a}</table>`+
+   `<div class="ovh">Reading-chain contrast, pass / fail</div><table class="f"><tr><th>case</th><th>reads per run</th><th>distinct reads</th><th>touched ground truth</th></tr>${b}</table>`+
+   `<div class="hint">E = distractor confirmed · CD = named the ground truth but failed · NOT = never named it. Built ${esc(d.built_at)}.</div></div>`}
+ catch(e){el.innerHTML=`<div class="err">${esc(e.message)}</div>`}}
+
+let histLoaded=false, allRuns=[];
+async function loadHistory(){histLoaded=true; allRuns=(await get('/history')).runs;
+ const fill=(id,vals)=>{$(id).innerHTML+= [...new Set(vals)].sort().map(v=>`<option>${esc(v)}</option>`).join('')};
+ fill('fcase',allRuns.map(r=>r.case_id)); fill('fmodel',allRuns.map(r=>r.model)); renderHistory()}
+function renderHistory(){const c=$('fcase').value,m=$('fmodel').value,o=$('fout').value,s=$('ftax').value;
+ const rows=allRuns.filter(r=>(!c||r.case_id===c)&&(!m||r.model===m)&&(!s||r.tax===s)&&(!o||(o==='pass')===r.passed));
+ $('hcount').textContent=`${rows.length} of ${allRuns.length} investigations`;
+ $('htable').innerHTML=RUNHEAD+rows.slice(0,400).map(runRow).join('')}
+['fcase','fmodel','fout','ftax'].forEach(id=>$(id).onchange=renderHistory);
+
+let taxLoaded=false;
+async function loadTaxonomy(){taxLoaded=true; const el=$('taxonomy');
+ try{const d=await get('/taxonomy'); const order=['A','B','C','D','E','F','G','H','N','?'];
+  const tot=Object.values(d.buckets).reduce((a,v)=>a+v.length,0);
+  const cases=Object.entries(d.matrix).filter(([,m])=>m.fail).sort((x,y)=>y[1].fail-x[1].fail);
+  const used=order.filter(b=>d.buckets[b]);
+  const bar=used.map(b=>{const n=d.buckets[b].length;return `<div title="${b}: ${n}" style="flex:${n};background:var(--panel)"><span class="bk ${b}" style="display:block;border-radius:0">${b} ${n}</span></div>`}).join('');
+  const mx=cases.map(([cid,m])=>`<tr class="row" onclick="pickCase('${cid}')"><td class="c">${short(cid)}</td><td>${m.pass}/${m.pass+m.fail}</td><td class="c">${m.term_recall==null?'—':m.term_recall+'%'}</td>`+used.map(b=>`<td>${m[b]?`<span class="bk ${b}">${m[b]}</span>`:''}</td>`).join('')+'</tr>').join('');
+  const defs=Object.entries(d.defs).map(([k,[name,fix]])=>`<div><span class="bk ${k}">${k}</span> <b>${esc(name)}</b> — fix: ${esc(fix)}</div>`).join('');
+  let h=`<div class="ov"><div>How each failing investigation strayed from the ground truth. The GT fact is traced through <b>tool outputs → agent findings → hypothesis → confirmed → final summary</b>; the layer where it drops out is the bucket.</div>`+
+   `<div class="defs">${defs}</div>`+
+   `<div class="ovh">${tot} failing runs · traces extracted for ${d.coverage.with_trace} of ${d.coverage.runs} runs</div><div style="display:flex;gap:2px;margin:6px 0 4px">${bar}</div>`+
+   `<div class="ovh">Case × bucket</div><div class="hint">term check = share of PASSING runs whose summary contains the case's GT terms (null test; low means the terms, not the run, are wrong).</div>`+
+   `<div class="scroll"><table class="f"><tr><th>case</th><th>pass</th><th>term check</th>${used.map(b=>`<th>${b}</th>`).join('')}</tr>${mx}</table></div></div>`;
+  const L=['outputs','ledger','hypothesis','confirmed','summary'];
+  const fr=Object.entries(d.funnel||{}).filter(([,v])=>v.pass&&v.fail).sort((x,y)=>y[1].fail.n-x[1].fail.n).map(([cid,v])=>
+   `<tr><td class="c">${short(cid)}</td><td class="c">${v.pass.n}/${v.fail.n}</td>`+L.map(l=>{const gap=v.pass[l]-v.fail[l];
+    return `<td>${v.pass[l]}% / <b>${v.fail[l]}%</b>${gap>=30?` <span style="color:var(--amber)">▲${gap}</span>`:''}</td>`}).join('')+'</tr>').join('');
+  if(fr)h+=`<div class="ov"><div class="ovh" style="margin-top:0">Funnel by outcome — % of runs where the GT fact reached each layer, pass / <b>fail</b></div>`+
+   `<div class="hint">The first layer with a large gap (▲) is where failing runs lose the fact. If no layer separates, the instrument is wrong for that case.</div>`+
+   `<div class="scroll"><table class="f"><tr><th>case</th><th>traces p/f</th>${L.map(l=>`<th>${l}</th>`).join('')}</tr>${fr}</table></div></div>`;
+  for(const b of used){const rows=d.buckets[b];
+   h+=`<details id="tb-${b}"><summary><span class="bk ${b}">${b}</span> ${esc((d.defs[b]||['unclassified (no trace)'])[0])} — ${rows.length} investigations</summary><div class="scroll"><table class="f">${RUNHEAD}${rows.slice(0,300).map(runRow).join('')}</table></div></details>`}
+  el.innerHTML=h}catch(e){el.innerHTML=`<div class="err">${esc(e.message)}</div>`}}
+function pickCase(cid){show('history'); $('fcase').value=cid; $('fout').value='fail'; renderHistory()}
+
+async function go(){const inv=$('inv').value.trim(), gt=$('gt').value.trim(), out=$('out'); if(!inv)return;
+ out.innerHTML='<div class="hint">fetching trace… large traces take 10–30s</div>';
+ try{render(await get(`/trace?investigation_id=${encodeURIComponent(inv)}`+(gt?`&gt=${encodeURIComponent(gt)}`:'')))}
+ catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}}
+$('go').onclick=go; $('inv').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+function render(d){const terms=(d.gt_terms||[]).map(t=>t.toLowerCase());
+ let h=`<div class="hrow" style="gap:12px"><h1 style="margin:0">${esc(d.investigation_id)}</h1><span class="badge ${d.outcome}">${d.outcome.replace(/_/g,' ')}</span></div>`;
+ h+=`<div class="hint">${d.case_id?'case: '+esc(d.case_id)+' · ':''}${terms.length?'ground truth: '+esc(terms.join(', ')):'no ground truth — type terms for a verdict'} · source: ${esc(d.source)}</div>`;
+ const t=d.tax||{};
+ if(t.funnel){h+=`<div class="ovh">Ground-truth funnel ${t.primary?`— <span class="bk ${t.primary}">${t.primary}</span> ${esc((TAXN[t.primary]||[''])[0])}`:''}</div><div class="funnel">`+
+  LAYERS.map(k=>`<span class="fn ${t.funnel[k]?'y':'n'}">${k}</span>`).join('')+`</div>`+
+  ((t.flags||[]).length?`<div class="hint">flags: ${esc(t.flags.join(', '))}${(t.artifacts||[]).length?' · artifacts in summary: '+esc(t.artifacts.join(', ')):''}</div>`:'')}
+ h+=`<div class="meta"><span>${d.rounds} orchestrator rounds</span><span>${d.hypotheses.length} hypotheses</span><span>${(d.reads||[]).length} reads</span></div>`;
+ h+='<div class="ovh">Hypothesis sequence</div>';
+ for(const y of d.hypotheses){const conf=y.status==='confirmed', rej=['rejected','refuted'].includes(y.status);
+  let cls='hyp'; if(y.is_ground_truth&&conf)cls+=' gt-conf'; else if(y.is_ground_truth&&rej)cls+=' gt-rej'; else if(conf)cls+=' conf';
+  let tag=''; if(y.is_ground_truth)tag='<span class="tag truth">GROUND TRUTH</span>'; else if(y.is_ground_truth===false&&conf)tag='<span class="tag distractor">DISTRACTOR CONFIRMED</span>';
+  h+=`<div class="${cls}"><div class="hrow"><span class="hid">[${esc(y.id)}]</span>${y.status_trajectory.map(s=>`<span class="st ${s}">${s}</span>`).join(' → ')}${tag}</div>`+
+   `<div class="htext">${esc(y.text)}</div>${y.final_reason?`<div class="reason">${esc(y.final_reason)}</div>`:''}</div>`}
+ if(!d.hypotheses.length)h+='<div class="hint">No hypothesis board found in this trace (older engine format).</div>';
+ const reads=d.reads||[];
+ if(reads.length){const hit=r=>terms.some(t=>(r.target||'').toLowerCase().includes(t)||r.read.includes(t));
+  h+=`<div class="ovh">Reading chain — ${reads.filter(hit).length} of ${reads.length} reads touch the ground truth (green)</div><div class="reads">`+
+   reads.map(r=>`<span class="rd ${hit(r)?'gt':''}" title="${esc(r.agent+': '+r.target)}">${esc(r.read)}</span>`).join('')+'</div>'}
+ if(d.final_summary)h+=`<div class="ovh">Final root-cause summary</div><div class="summary">${esc(d.final_summary)}</div>`;
+ $('out').innerHTML=h}
+loadOverview();
+</script></body></html>
