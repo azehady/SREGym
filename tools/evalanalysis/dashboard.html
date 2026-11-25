@@ -59,6 +59,15 @@
  .lad .y{background:#173a27;color:var(--green);font-family:var(--mono)}.lad .n{background:#3a1a17;color:var(--red);font-family:var(--mono)}.lad .div{outline:2px solid var(--amber)}
  .cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}.cols.one{grid-template-columns:1fr}
  @media(max-width:820px){.cols{grid-template-columns:1fr}}
+ .hscroll{overflow-x:auto;padding-bottom:6px}.hgrid{display:grid;gap:10px;align-items:start}
+ .chead{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 10px;font-size:.8rem;min-width:0}
+ .chead.ref{border-color:var(--green)}.chead .x{margin-left:auto;background:none;border:0;color:var(--faint);cursor:pointer;font-size:1rem;line-height:1}
+ .chead .x:hover{color:var(--red)}.reftag{font:700 .6rem var(--mono);color:var(--green);letter-spacing:.06em}
+ .step{border-radius:7px;padding:9px 11px;font-size:.8rem;min-width:0;overflow-wrap:anywhere}
+ .step.y{background:#16241c;border:1px solid #24503a}.step.n{background:#24181a;border:1px solid #4a2626}
+ .step .sh{display:flex;gap:6px;align-items:center;font:600 .68rem var(--mono);margin-bottom:4px}.step.y .sh{color:var(--green)}.step.n .sh{color:var(--red)}
+ .step .inst{color:var(--mut)}.lbl2{font:600 .64rem var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding:10px 2px 2px}
+ .bel{display:inline-block;padding:2px 7px;border-radius:4px;font:600 .7rem var(--mono)}.bel.bad{background:#3a1a17;color:var(--red)}.bel.warn{background:#3a2c14;color:var(--amber)}.bel.ok{background:#173a27;color:var(--green)}.bel.none{color:var(--faint)}
  .colh{font:700 .8rem var(--mono);padding:6px 2px}
  .rc{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:7px;padding:10px 12px;font-size:.8rem;min-width:0}
  .rc.gt{border-left-color:var(--green)}.rc.blank{background:none;border-style:dashed;color:var(--faint)}
@@ -112,11 +121,12 @@
  <div id="compare" class="view">
   <div class="bar">
    <select id="ccase"><option value="">pick a case…</option></select>
-   <select id="cbad"><option value="">failing run…</option></select>
-   <select id="cok"><option value="">passing run…</option></select>
-   <button class="go" id="cgo">Compare</button>
+   <select id="cadd"><option value="">add a run of this case…</option></select>
+   <input id="caddref" placeholder="or any prod0:INV-… / evals:INV-…" style="min-width:230px">
+   <button class="go" id="cgo">Add</button>
+   <span id="ccount" class="hint"></span>
   </div>
-  <div id="cout"><div class="hint">Pick a case, then a failing run and a passing run of it. The page lines up where each run met the ground-truth fact and shows where the failing run left the path.</div></div>
+  <div id="cout"><div class="hint">Pick a case. It opens with a failing run and its closest passing run; add more runs to line them up side by side. Every run is diffed against the reference, the first run that reached the ground truth.</div></div>
  </div>
  <div id="trace" class="view">
   <div class="bar">
@@ -174,7 +184,7 @@ function runRow(r){const ref=esc(r.ref||'');
  return `<tr class="row" onclick="nav('trace',{ref:'${ref}'})"><td class="c">${idcell(r)}</td>`+
  `${caseTd}<td>${esc(r.model)}</td><td>${outcome(r)}</td><td>${r.composite??''}</td><td>${r.scored===false?'':`${r.d1} / ${r.d2} / ${r.d3}`}</td>`+
  `<td>${r.tax?`<span class="bk ${r.tax}" title="${esc(TAXN[r.tax]||'')}">${r.tax}</span>`:''}${(r.flags||[]).filter(f=>f!==r.tax).map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</td><td>${strip(r.funnel)}</td>`+
- `<td>${r.scored!==false&&!r.passed&&r.funnel?`<a href="#compare?b=${ref}" onclick="event.stopPropagation()">vs a pass</a>`:''}</td><td class="c">${esc(r.created_at)}</td></tr>`}
+ `<td>${r.scored!==false&&!r.passed&&r.funnel?`<a href="#compare?refs=${ref}" onclick="event.stopPropagation()">vs a pass</a>`:''}</td><td class="c">${esc(r.created_at)}</td></tr>`}
 const RUNHEAD='<tr><th>investigation</th><th>case</th><th>model</th><th>result</th><th>score</th><th>D1 / D2 / D3</th><th>A–H</th><th>funnel</th><th></th><th>when</th></tr>';
 
 /* data shared by Overview and Failure taxonomy */
@@ -316,64 +326,104 @@ VIEWS.trace=async p=>{const out=$('out'); const ref=p.ref||p.inv; if(!ref)return
    PATH.map(([k,l])=>`<div>${l}</div><div class="${ms[k]?'y':'n'}">${ms[k]?`round ${ms[k].round} · +${ms[k].t} min`:'never'}</div>`).join('')+`</div>`;
   if(t.summary_mentions_only)h+=`<div class="hint">The summary mentions the ground-truth component, but the judge says it is not blamed as the origin.</div>`;
   if(r.scored===false)h+=`<div class="hint">No ground truth: ${esc(r.kind)} (${esc(r.summary||'')}). The timeline shows how it reasoned; the ladder above cannot be judged.</div>`;
-  if(r.run_id&&!r.passed)h+=judge(d)+`<p><a href="#compare?b=${esc(d.ref)}">Compare with a passing run of this case →</a></p>`;
+  if(r.run_id&&!r.passed)h+=judge(d)+`<p><a href="#compare?refs=${esc(d.ref)}">Compare with a passing run of this case →</a></p>`;
   h+=`<div class="ovh">Timeline — one card per orchestrator dispatch; green marks contact with the ground truth</div><div class="cols one">${t.rounds.filter(x=>x.n).map(x=>roundCard(x,ms)).join('')||'<div class="hint">No rounds found in this trace.</div>'}</div>`;
   h+=`<div class="ovh">Hypotheses</div>${hypCards(t.hypotheses)}`;
   if(t.final_summary)h+=`<div class="ovh">Final root-cause summary</div><div class="summary">${esc(t.final_summary)}</div>`;
   out.innerHTML=h; loadReport(d.ref,$('rep1'))}catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
 $('go').onclick=()=>nav('trace',{ref:$('inv').value.trim()}); $('inv').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').onclick()});
 
-/* compare: a run that reached the ground truth vs one that did not */
-const opt=r=>`<option value="${esc(r.ref)}">${esc(r.investigation_id)} · ${esc(r.plane_label)} · ${esc(r.model)} · ${r.composite}${r.tax?' · '+r.tax:''} · ${esc(r.created_at.slice(0,10))}</option>`;
-async function fillCompare(cid,a,b){const R=await runs(); if(!$('ccase').dataset.done){
+/* compare: N runs side by side, each diffed against the reference (first run that reached the GT) */
+const opt=r=>`<option value="${esc(r.ref)}">${r.passed?'pass':'fail'} · ${esc(r.investigation_id)} · ${esc(r.plane_label)} · ${esc(r.model)} · ${r.composite}${r.tax?' · '+r.tax:''} · ${esc(r.created_at.slice(0,10))}</option>`;
+let CMP=[];
+const cmpNav=refs=>nav('compare',{refs:refs.join(',')});
+async function fillCompare(cid,refs){const R=await runs(); if(!$('ccase').dataset.done){
   const cs=[...new Set(R.map(r=>r.case_id).filter(Boolean))].filter(c=>R.some(r=>r.case_id===c&&r.passed&&r.funnel)&&R.some(r=>r.case_id===c&&!r.passed&&r.funnel)).sort();
   $('ccase').innerHTML+=cs.map(c=>`<option value="${c}">${short(c)}</option>`).join(''); $('ccase').dataset.done=1}
- $('ccase').value=cid||''; const S=R.filter(r=>r.case_id===cid&&r.funnel&&r.ref);
- $('cbad').innerHTML='<option value="">failing run…</option>'+S.filter(r=>!r.passed).map(opt).join('');
- $('cok').innerHTML='<option value="">passing run…</option>'+S.filter(r=>r.passed).map(opt).join('');
- $('cbad').value=b||''; $('cok').value=a||''}
-VIEWS.compare=async p=>{const out=$('cout'); const R=await runs(); let {a,b}=p; let cid=p.case||'';
- const find=i=>R.find(r=>r.ref===i);
+ $('ccase').value=cid||''; const S=R.filter(r=>r.case_id===cid&&r.funnel&&r.ref&&!refs.includes(r.ref));
+ $('cadd').innerHTML=`<option value="">add a run of this case… (${S.length})</option>`+S.filter(r=>r.passed).map(opt).join('')+S.filter(r=>!r.passed).map(opt).join('');
+ const full=refs.length>=5; $('cadd').disabled=full; $('cgo').disabled=full; $('caddref').disabled=full;
+ $('ccount').textContent=refs.length?`${refs.length} of 5 runs${full?' · remove one to add another':''}`:''}
+VIEWS.compare=async p=>{const out=$('cout'); const R=await runs(); const find=i=>R.find(r=>r.ref===i);
+ let refs=(p.refs||'').split(',').filter(Boolean);
+ if(!refs.length&&(p.a||p.b))refs=[p.a,p.b].filter(Boolean);            // old #compare?a=&b= links
+ let cid=p.case||'';
  try{
-  if(cid&&!a&&!b){const f=R.find(r=>r.case_id===cid&&r.funnel&&r.scored!==false&&!r.passed); if(f)b=f.ref}
-  if(b&&!a){const ps=(await get('/partners?ref='+encodeURIComponent(b))).partners; if(ps.length)a=ps[0].ref}
-  cid=cid||(find(b)||find(a)||{}).case_id||''; await fillCompare(cid,a,b);
-  if(b&&!a){out.innerHTML='<div class="hint">This case has no passing run with a trace to compare against.</div>';return}
-  if(!a||!b)return;
-  if(!p.a||!p.b){history.replaceState(null,'',`#compare?a=${a}&b=${b}`)}
-  CTX=[a,b]; setAsk();
-  out.innerHTML='<div class="hint">building both timelines… a first load takes up to a minute, then it is cached</div>';
-  const d=await get(`/compare_traces?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`); const ok=d.ok, bad=d.bad, df=d.diff;
-  let h=(d.same_case?'':'<div class="err">These two runs are from different cases; the comparison is not meaningful.</div>')+gtbox(ok);
-  h+=`<div class="story"><b>Where the failing run left the path.</b> ${esc(df.story)}</div>`;
-  h+=`<div class="ovh">The two reports, graded against the ground truth</div><div class="cols"><div id="repA"><div class="hint">grading…</div></div><div id="repB"><div class="hint">grading…</div></div></div>`;
-  h+=`<div class="ovh">The ground-truth fact, layer by layer</div><div class="lad"><div class="h">layer</div><div class="h">reached GT · ${esc(df.ok)}</div><div class="h">failed · ${esc(df.bad)}</div>`+
-   df.rows.map(r=>{const c=m=>m?`<div class="y">round ${m.round} · +${m.t} min</div>`:`<div class="n ${r.layer===df.divergence?'div':''}">never</div>`; return `<div>${esc(r.label)}</div>${c(r.ok)}${c(r.bad)}`}).join('')+`</div>`;
+  if(cid&&!refs.length){const f=R.find(r=>r.case_id===cid&&r.funnel&&r.scored!==false&&!r.passed); if(f)refs=[f.ref]}
+  if(refs.length===1){const ps=(await get('/partners?ref='+encodeURIComponent(refs[0]))).partners; if(ps.length)refs.unshift(ps[0].ref)}
+  cid=cid||(find(refs[0])||find(refs[1])||{}).case_id||''; CMP=refs; await fillCompare(cid,refs);
+  if(!refs.length)return;
+  if(p.refs!==refs.join(','))history.replaceState(null,'','#compare?refs='+refs.join(','));
+  if(refs.length<2){out.innerHTML='<div class="hint">Add a second run to compare.</div>';return}
+  CTX=refs.slice(0,4); setAsk();
+  out.innerHTML=`<div class="hint">building ${refs.length} timelines… first loads take up to a minute each, then they are cached</div>`;
+  const d=await get('/compare_many?refs='+encodeURIComponent(refs.join(',')));
+  // reference first, then the rest in the order the user added them
+  const runsD=[d.runs.find(x=>x.ref===d.reference),...d.runs.filter(x=>x.ref!==d.reference)];
+  const N=runsD.length, cols=`grid-template-columns:repeat(${N},minmax(360px,1fr))`;
+  const row=cells=>`<div class="hgrid" style="${cols}">${cells.join('')}</div>`;
+  const ref=runsD[0];
+  let h=(d.same_case?'':`<div class="err">These runs come from different cases (${esc(d.cases.join(', '))}); line-ups by ground truth are not meaningful across cases.</div>`)+gtbox(ref);
+  // 1. the path that found it, and what every other run did at each step instead
+  const P=d.paths, LBL={output:'Read the decisive evidence',finding:'An agent reported it',note:'Orchestrator wrote it down',hypothesis:'Raised it as a hypothesis',confirmed:'Confirmed it',summary:'Concluded it (judge D1)'};
+  const refRun=ref.run||{};
+  h+=`<div class="ovh">The reasoning path that ${refRun.passed?'found':'came closest to'} the root cause, and where the others went astray</div>`;
+  h+=`<div class="hint">Left column: the reference run's own steps toward the ground truth. Other columns: the same step in each run; red cells show what that run was pursuing instead at that point.</div><div class="hscroll">`;
+  h+=row(runsD.map((x,k)=>`<div class="chead ${k?'':'ref'}">${k?'':`<span class="reftag">${refRun.passed?'FOUND IT':'CLOSEST'} · REFERENCE</span>`}${head(x)}</div>`));
+  for(const l of d.layers){
+   h+=`<div class="lbl2">${esc(LBL[l.key]||l.label)}</div>`;
+   h+=row(runsD.map((x,k)=>{const st=(P[x.ref]||{})[l.key]||{}; const dv=k&&(d.diffs[x.ref]||{}).divergence===l.key;
+    return st.reached?`<div class="step y"><div class="sh">✓ round ${st.round} · +${st.t} min</div>${esc(st.text||'')}</div>`
+     :`<div class="step n" style="${dv?'outline:2px solid var(--amber)':''}"><div class="sh">✗ never${dv?' · LEFT THE PATH HERE':''}</div><span class="inst">${st.instead?'instead, '+esc(st.instead):''}</span></div>`}));
+  }
+  h+='</div>';
+  h+=runsD.slice(1).map(x=>`<div class="story"><b>${esc(x.timeline.investigation_id)}</b> <span class="plane ${esc((x.run||{}).plane||'')}">${esc((x.run||{}).plane_label||'')}</span> ${x.run?outcome(x.run):''} ${esc((d.diffs[x.ref]||{}).story||'')}</div>`).join('');
+  // 2. how the runs' own reports differ: what each believed about every component
+  const RP=d.reports||{};
+  const st=c=>c?`<span class="bel ${esc(c.state||'none')}" title="${esc(c.note||'')}">${esc(c.label||c.state||'—')}</span>`:'<span class="bel none">not drawn</span>';
+  const hy=g=>{const h=(g.hypotheses||[]).filter(x=>x.gt); if(!g.has_gt||g.layout!=='tabbed')return '<span class="hint">—</span>'; if(!h.length)return '<span class="pil fail">none</span>'; const b=h.sort((a,c)=>c.stars-a.stars)[0]; return `<span class="st ${esc((b.status||'').toLowerCase())}">${esc(b.status)}</span> ${'★'.repeat(b.stars)}`};
+  h+=`<div class="ovh">How the runs' own reports differ</div><div class="scroll"><table class="f"><tr><th></th>${runsD.map((x,k)=>`<th>${k?'':'reference · '}${esc(x.timeline.investigation_id)}</th>`).join('')}</tr>`+
+   `<tr><td>headline</td>${runsD.map(x=>`<td class="w">${esc((RP[x.ref]||{}).headline||'—')}</td>`).join('')}</tr>`+
+   `<tr><td>report checks vs truth</td>${runsD.map(x=>{const g=RP[x.ref]||{};return `<td>${g.score?`<span class="score">${esc(g.score)}</span>`:'—'} ${g.blind_spot?'<span class="blind">BLIND SPOT</span>':''}</td>`}).join('')}</tr>`+
+   `<tr><td>reporter confidence</td>${runsD.map(x=>`<td>${(RP[x.ref]||{}).confidence??'—'}</td>`).join('')}</tr>`+
+   `<tr><td>ground-truth hypothesis</td>${runsD.map(x=>`<td>${hy(RP[x.ref]||{})}</td>`).join('')}</tr>`+
+   `<tr><td>evidence cards showing it</td>${runsD.map(x=>{const e=(RP[x.ref]||{}).evidence||[];return `<td>${e.length?`${e.filter(c=>c.gt).length} of ${e.length}`:'—'}</td>`}).join('')}</tr>`+
+   (d.belief_matrix||[]).map(c=>`<tr><td>${c.gt?'<span class="tag truth" style="margin:0 6px 0 0">GT</span>':''}${esc(c.label)}</td>${runsD.map(x=>`<td>${RP[x.ref]&&RP[x.ref].topology?st(c.cells[x.ref]):'<span class="hint">no topology</span>'}</td>`).join('')}</tr>`).join('')+
+   '</table></div>';
+  if(!(d.belief_matrix||[]).length)h+='<div class="hint">None of these reports carries a topology (older reporter builds), so only headline, hypotheses and evidence can be compared.</div>';
+  const L=d.layers;
+  h+=`<div class="ovh">The ground-truth fact, layer by layer</div><div class="scroll"><table class="f"><tr><th>layer</th>${runsD.map((x,k)=>`<th>${k?'':'reference · '}${esc(x.timeline.investigation_id)} <span class="plane ${esc((x.run||{}).plane||'')}">${esc((x.run||{}).plane_label||'')}</span></th>`).join('')}</tr>`+
+   L.map(l=>`<tr><td>${esc(l.label)}</td>${runsD.map((x,k)=>{const m=x.timeline.milestones[l.key]; const dv=k&&(d.diffs[x.ref]||{}).divergence===l.key;
+    return `<td><span class="pil ${m?'pass':'fail'}" style="${dv?'outline:2px solid var(--amber)':''}">${m?`round ${m.round} · +${m.t} min`:'never'}</span></td>`}).join('')}</tr>`).join('')+'</table></div>';
   h+=`<div class="ovh">Diagram <button class="ghost" id="mmcopy" style="margin-left:8px">Copy Mermaid</button></div><div class="mm" id="mmout"></div>`;
-  if(df.decisive_reads.length)h+=`<div class="ovh">Kinds of read that touched the ground truth in the passing run — ${df.reads_missing_in_fail} had no equivalent in the failing run</div><div class="scroll"><table class="f"><tr><th>round</th><th>agent</th><th>read</th><th>fact in output</th><th>failing run made an equivalent read</th></tr>`+
-   df.decisive_reads.map(x=>`<tr><td>${x.round}</td><td>${esc(x.agent)}</td><td class="c w">${esc(x.target)}</td><td>${x.hit?'<span class="pil pass">yes</span>':'<span class="pil">probe only</span>'}</td><td>${x.also_in_fail?'<span class="pil pass">yes</span>':'<span class="pil fail">no</span>'}</td></tr>`).join('')+`</table></div>`;
-  h+=judge(bad);
-  const n=Math.max(ok.timeline.rounds.length,bad.timeline.rounds.length); let grid='';
-  for(let i=1;i<n;i++)grid+=roundCard(ok.timeline.rounds[i],ok.timeline.milestones)+roundCard(bad.timeline.rounds[i],bad.timeline.milestones);
-  h+=`<div class="ovh">Round by round</div><div class="cols"><div class="colh">${head(ok)}</div><div class="colh">${head(bad)}</div>${grid}</div>`;
-  h+=`<div class="ovh">Hypotheses</div><div class="cols"><div>${hypCards(ok.timeline.hypotheses)}</div><div>${hypCards(bad.timeline.hypotheses)}</div></div>`;
-  h+=`<div class="ovh">Final summaries</div><div class="cols"><div class="summary">${esc(ok.timeline.final_summary)}</div><div class="summary">${esc(bad.timeline.final_summary)}</div></div>`;
-  out.innerHTML=h; loadReport(ok.ref,$('repA')); loadReport(bad.ref,$('repB')); drawMermaid($('mmout'),df.mermaid); $('mmcopy').onclick=e=>copyText(df.mermaid,e.target);
+  h+=`<div class="ovh">Side by side — the columns scroll together</div><div class="hscroll">`;
+  h+=row(runsD.map((x,k)=>`<div class="chead ${k?'':'ref'}"><div style="display:flex;gap:6px;align-items:flex-start">${head(x)}<button class="x" title="Remove from comparison" onclick="cmpNav(CMP.filter(r=>r!=='${esc(x.ref)}'))">×</button></div></div>`));
+  h+=`<div class="ovh">The runs' own reports, graded against the ground truth</div>`+row(runsD.map((x,k)=>`<div id="rep_${k}"><div class="hint">grading…</div></div>`));
+  h+=`<div class="ovh">What the judge says each run missed</div>`+row(runsD.map(x=>`<div class="rc">${(x.judge||[]).length?x.judge.slice(0,6).map(j=>`<p><span class="pil">${esc(j.id||j.question_id||j.dim)}</span>${esc(j.evidence)}</p>`).join(''):'<span class="hint">nothing missed</span>'}</div>`));
+  const nr=Math.max(...runsD.map(x=>x.timeline.rounds.length));
+  h+=`<div class="ovh">Round by round</div>`;
+  for(let i=1;i<nr;i++)h+=row(runsD.map(x=>roundCard(x.timeline.rounds[i],x.timeline.milestones)));
+  h+=`<div class="ovh">Hypotheses</div>`+row(runsD.map(x=>`<div>${hypCards(x.timeline.hypotheses)}</div>`));
+  h+=`<div class="ovh">Final summaries</div>`+row(runsD.map(x=>`<div class="summary">${esc(x.timeline.final_summary)}</div>`));
+  h+='</div>';
+  out.innerHTML=h; runsD.forEach((x,k)=>{const g=(d.reports||{})[x.ref]; $('rep_'+k).innerHTML=g?reportCard(g):''});
+  drawMermaid($('mmout'),d.mermaid); $('mmcopy').onclick=e=>copyText(d.mermaid,e.target);
  }catch(e){out.innerHTML=`<div class="err">${esc(e.message)}</div>`}};
 $('ccase').onchange=()=>nav('compare',{case:$('ccase').value});
-$('cbad').onchange=()=>nav('compare',{b:$('cbad').value});
-$('cgo').onclick=()=>nav('compare',{a:$('cok').value,b:$('cbad').value});
+$('cadd').onchange=()=>{const r=$('cadd').value; if(r&&CMP.length<5)cmpNav([...CMP,r])};
+$('cgo').onclick=()=>{const r=($('caddref').value||'').trim(); if(r&&CMP.length<5){$('caddref').value=''; cmpNav([...CMP.filter(x=>x!==r),r])}};
+$('caddref').addEventListener('keydown',e=>{if(e.key==='Enter')$('cgo').onclick()});
 
 /* chat, scoped to what is on screen */
 const SUG={0:['Which cases fail most, and at which layer?','What harness change would fix the largest bucket?'],
  1:['Where did this run leave the path to the ground truth?','Was the decisive fact in the tool outputs? Check.','What harness change would have fixed this run?'],
- 2:['What did the passing run do that the failing run did not?','At the point they diverge, what was the failing run thinking?','What single harness change would make the failing run pass?']};
-function setAsk(){$('askbtn').textContent=CTX.length===2?'Ask about this comparison':CTX.length===1?'Ask about this investigation':'Ask about the evals'; if($('chat').classList.contains('on'))drawChat()}
+ 2:['What did the passing run do that the failing runs did not?','At the point they diverge, what was the failing run thinking?','What single harness change would make the failing run pass?']};
+function setAsk(){$('askbtn').textContent=CTX.length>=2?'Ask about this comparison':CTX.length===1?'Ask about this investigation':'Ask about the evals'; if($('chat').classList.contains('on'))drawChat()}
 function drawChat(){const key=CTX.join('|'); if(CHAT.key!==key)CHAT={key,msgs:[]};
  $('cctx').textContent=CTX.length?CTX.join(' vs '):'all evals';
  const md=s=>esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`([^`]+)`/g,'<code>$1</code>');
  $('clog').innerHTML=CHAT.msgs.map(m=>`<div class="msg ${m.role==='user'?'u':''}">${m.role==='user'?esc(m.content):md(m.content)}</div>`).join('')||
-  `<div class="hint">Answers are grounded in the timeline, the ground truth and the judge's notes${CTX.length?' for '+esc(CTX.join(' and ')):''}.</div><div class="sug">${SUG[CTX.length].map(s=>`<button class="ghost" onclick="ask(this.textContent)">${esc(s)}</button>`).join('')}</div>`;
+  `<div class="hint">Answers are grounded in the timeline, the ground truth and the judge's notes${CTX.length?' for '+esc(CTX.join(' and ')):''}.</div><div class="sug">${SUG[Math.min(CTX.length,2)].map(s=>`<button class="ghost" onclick="ask(this.textContent)">${esc(s)}</button>`).join('')}</div>`;
  $('clog').scrollTop=1e9}
 async function ask(q){q=(q||'').trim(); if(!q)return; CHAT.msgs.push({role:'user',content:q}); drawChat();
  $('clog').insertAdjacentHTML('beforeend','<div class="hint" id="cwait">reading the trace…</div>'); $('clog').scrollTop=1e9;

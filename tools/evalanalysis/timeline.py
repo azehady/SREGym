@@ -266,7 +266,7 @@ def compare(ok: dict, bad: dict) -> dict:
             story += f" It raised the true cause and then rejected it" + \
                      (f": \"{rej[0]['reason'][:220]}\"" if rej[0]["reason"] else ".")
         if instead:
-            story += f" It confirmed instead: \"{instead[0]['text'][:160]}\"."
+            story += f" It confirmed instead: \"{_clean(instead[0]['text'])[:160]}\"."
     missing = [d for d in decisive if not d["also_in_fail"]]
     return {"ok": ok.get("ref") or ok["investigation_id"], "bad": bad.get("ref") or bad["investigation_id"], "rows": rows,
             "divergence": div, "story": story, "decisive_reads": decisive[:14],
@@ -301,6 +301,86 @@ def mermaid(ok: dict, bad: dict, rows: list[dict], div: str | None) -> str:
         out.append("  end")
         out.append(f"  style {side} fill:#1c2026,stroke:#2a2f37,color:#e8e6e0")
     out.append("  ok ~~~ bad")
+    return "\n".join(out)
+
+
+def path(tl: dict) -> dict:
+    """The run's reasoning path toward the GT: per layer, the round it happened and the concrete
+    step (the read, the finding, the hypothesis...). Missing layers are None."""
+    out = {}
+    rounds = {r["n"]: r for r in tl.get("rounds", [])}
+    ms = tl.get("milestones", {})
+    gt_h = [h for h in tl.get("hypotheses", []) if h.get("gt")]
+    for key, _ in LAYERS:
+        m = ms.get(key)
+        if not m:
+            out[key] = None
+            continue
+        r = rounds.get(m["round"], {})
+        if key == "output":
+            x = next((x for x in r.get("reads", []) if x["hit"]), None)
+            text = f"{x['agent']} ran `{x['target'] or x['read']}` and the output held the fact" if x else ""
+        elif key == "finding":
+            x = next((f for f in r.get("findings", []) if f["gt"]), None)
+            text = f"{x['agent']} reported: {x['summary'] or x['answer'][:240]}" if x else ""
+        elif key == "note":
+            x = next((n for n in r.get("notes", []) if n["gt"] and n["kind"] != "complete"), None)
+            text = f"orchestrator {x['kind']}: {x['text'][:260]}" if x else ""
+        elif key in ("hypothesis", "confirmed"):
+            text = f"[{gt_h[0]['id']}] {gt_h[0]['text'][:220]}" if gt_h else ""
+        else:
+            text = (tl.get("final_summary") or "")[:300]
+        out[key] = {**m, "text": text}
+    return out
+
+
+def _clean(t: str) -> str:
+    return re.sub(r"\s*\((\\u260[56])+\)|\\u260[56]", "", t or "")
+
+
+def doing_instead(tl: dict, round_n: int | None) -> str:
+    """What a run was pursuing around a given round: its intent and the hypotheses it moved."""
+    rs = [r for r in tl.get("rounds", []) if r["n"]]
+    if not rs:
+        return ""
+    r = min(rs, key=lambda r: abs(r["n"] - (round_n or 1)))
+    bits = []
+    if r.get("intent"):
+        bits.append(f"round {r['n']} intent: {r['intent'][:200]}")
+    moved = [b for b in r.get("board", []) if not b.get("gt")][:2]
+    bits += [f"{b['was'] or 'new'} → {b['status']}: {b['text'][:140]}" for b in moved]
+    return _clean(" · ".join(bits))
+
+
+def mermaid_many(tls: list[dict], ref_idx: int = 0) -> str:
+    """One lane of GT milestones per run; the reference lane first, misses in red."""
+    out = ["flowchart TB", "  classDef hit fill:#173a27,stroke:#4bb972,color:#e8e6e0",
+           "  classDef miss fill:#3a1a17,stroke:#e0574f,color:#e8e6e0",
+           "  classDef wrong fill:#3a2c14,stroke:#d99a4e,color:#e8e6e0"]
+    order = [ref_idx] + [i for i in range(len(tls)) if i != ref_idx]
+    lanes = []
+    for k, i in enumerate(order):
+        tl, side = tls[i], f"r{k}"
+        tag = "REFERENCE" if k == 0 else f"RUN {k + 1}"
+        out.append(f'  subgraph {side}["{tag} {tl["investigation_id"]}"]')
+        out.append("    direction LR")
+        ids = []
+        for key, _ in LAYERS:
+            m = tl["milestones"].get(key)
+            nid = f"{side}_{key}"
+            txt = f"{key}<br/>round {m['round']} · {m['t']} min" if m else f"{key}<br/>never"
+            out.append(f'    {nid}["{txt}"]:::{"hit" if m else "miss"}')
+            ids.append(nid)
+        out.append("    " + " --> ".join(ids))
+        if k:
+            for j, h in enumerate([h for h in tl["hypotheses"] if h["status"] == "confirmed" and not h["gt"]][:1]):
+                out.append(f'    {side}_w{j}["confirmed instead:<br/>{_mm(h["text"])}"]:::wrong')
+                out.append(f"    {ids[-1]} -.-> {side}_w{j}")
+        out.append("  end")
+        out.append(f"  style {side} fill:#1c2026,stroke:#2a2f37,color:#e8e6e0")
+        lanes.append(side)
+    if len(lanes) > 1:
+        out.append("  " + " ~~~ ".join(lanes))
     return "\n".join(out)
 
 

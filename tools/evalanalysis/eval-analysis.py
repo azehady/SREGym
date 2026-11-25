@@ -479,6 +479,71 @@ def _reports_summary() -> dict:
     return {"belief": belief, "checks": checks, "layouts": layouts, "graded": len(grades)}
 
 
+MAX_COMPARE = 5
+
+
+def _compare_many(refs: list[str]) -> dict:
+    """N investigations side by side. The first run that reached the ground truth is the
+    reference (else the first given); every other run is diffed against it."""
+    refs = list(dict.fromkeys(r for r in refs if r))[:MAX_COMPARE]
+    ps = [_inv_payload(r) for r in refs]
+    # Reference = the run closest to the truth: passed first, then the highest judge score.
+    def rank(i):
+        run = ps[i]["run"] or {}
+        return (bool(run.get("passed")), run.get("composite") or 0, run.get("d1") or 0)
+    ref_idx = max(range(len(ps)), key=rank)
+    ref = ps[ref_idx]
+    diffs = {}
+    for i, p in enumerate(ps):
+        if i == ref_idx:
+            continue
+        d = TL.compare(ref["timeline"], p["timeline"])
+        if p["timeline"].get("summary_mentions_only"):
+            d1 = next((j for j in p["judge"] if str(j.get("dim")) == "D1"), None)
+            d["story"] += (" Its summary mentions the ground-truth component but does not blame it"
+                           + (f"; the judge: \"{str(d1.get('evidence'))[:260]}\"" if d1 else "."))
+        d.pop("mermaid", None)
+        diffs[p["ref"]] = d
+    cases = {p["case_id"] for p in ps}
+    # The correct path (reference) step by step, and for each other run what it did at that step.
+    ref_path = TL.path(ref["timeline"])
+    paths = {}
+    for p in ps:
+        own = TL.path(p["timeline"])
+        steps = {}
+        for k, _ in TL.LAYERS:
+            if own.get(k):
+                steps[k] = {"reached": True, **own[k]}
+            else:
+                at = (ref_path.get(k) or {}).get("round")
+                steps[k] = {"reached": False, "instead": TL.doing_instead(p["timeline"], at)}
+        paths[p["ref"]] = steps
+    # Each run's own report, graded; plus a component x run matrix of what each report believed.
+    reports = {}
+    for p in ps:
+        try:
+            g = _report(p["ref"])
+        except Exception as e:
+            g = {"layout": "error", "error": str(e)[:200]}
+        reports[p["ref"]] = g
+    comps: dict = {}
+    for r, g in reports.items():
+        for nid, n in ((g.get("topology") or {}).get("nodes") or {}).items():
+            key = (n.get("label") or nid).lower()
+            row = comps.setdefault(key, {"label": n.get("label") or nid, "gt": False, "cells": {}})
+            names = X.gt_component(ps[0]["case_id"]) if ps else []
+            row["gt"] = row["gt"] or any(c in key or c in nid.lower() for c in names)
+            b = n.get("belief") or []
+            row["cells"][r] = {"state": (b[0] if b else ""), "label": (b[1] if len(b) > 1 else ""),
+                               "note": n.get("note", "")[:200]}
+    matrix = sorted(comps.values(), key=lambda c: (not c["gt"], -len(c["cells"]), c["label"]))
+    return {"runs": ps, "reference": ref["ref"], "diffs": diffs, "paths": paths,
+            "reports": reports, "belief_matrix": matrix[:14],
+            "layers": [{"key": k, "label": l} for k, l in TL.LAYERS],
+            "same_case": len(cases) == 1, "cases": sorted(c for c in cases if c),
+            "mermaid": TL.mermaid_many([p["timeline"] for p in ps], ref_idx)}
+
+
 def _history(q: dict, full: bool = False) -> list[dict]:
     """Every scored run plus unscored prod0 investigations, newest first, with filters."""
     one = lambda k: (q.get(k) or [""])[0]
@@ -551,7 +616,7 @@ def _taxonomy() -> dict:
 
 def _chat_context(invs: list[str]) -> str:
     """Ground the chat in specific investigations: GT, taxonomy, judge misses, timeline digest."""
-    invs = [i for i in invs if i][:2]
+    invs = [i for i in invs if i][:4]
     if not invs:
         return ""
     ps = [_inv_payload(i) for i in invs]
@@ -571,13 +636,14 @@ def _chat_context(invs: list[str]) -> str:
         if p["judge"]:
             out.append("Judge sub-questions failed: " + " | ".join(
                 f"{j.get('question_id')}: {str(j.get('evidence'))[:200]}" for j in p["judge"][:6]))
-        out.append(TL.digest(p["timeline"], 9000 if len(ps) == 1 else 6500))
-    if len(ps) == 2:
-        d = _compare(invs[0], invs[1])["diff"]
-        out.append(f"\n=== COMPARISON (reference {d['ok']} vs {d['bad']}) ===\n{d['story']}\n"
-                   f"Milestones: " + "; ".join(
-                       f"{r['layer']}: ref={'R%s' % r['ok']['round'] if r['ok'] else 'never'} "
-                       f"other={'R%s' % r['bad']['round'] if r['bad'] else 'never'}" for r in d["rows"]))
+        out.append(TL.digest(p["timeline"], {1: 9000, 2: 6500, 3: 4500}.get(len(ps), 3500)))
+    if len(ps) >= 2:
+        cm = _compare_many(invs)
+        out.append(f"\n=== COMPARISON (reference {cm['reference']}, the run that reached the ground truth) ===")
+        for r, d in cm["diffs"].items():
+            out.append(f"vs {r}: {d['story']}\n  Milestones: " + "; ".join(
+                f"{x['layer']}: ref={'R%s' % x['ok']['round'] if x['ok'] else 'never'} "
+                f"this={'R%s' % x['bad']['round'] if x['bad'] else 'never'}" for x in d["rows"]))
     return "\n".join(out)
 
 
@@ -677,6 +743,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.ok(_report(one("ref")))
             if path == "/api/v1/evalanalysis/reports_summary":
                 return self.ok(_reports_summary())
+            if path == "/api/v1/evalanalysis/compare_many":
+                return self.ok(_compare_many(one("refs").split(",")))
             if path == "/api/v1/evalanalysis/compare_traces":
                 return self.ok(_compare(one("a"), one("b")))
         except Exception as e:

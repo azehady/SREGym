@@ -120,8 +120,9 @@ def _walk(spans):
 
 
 def _lines(prompt) -> list[str]:
-    """Board text may arrive with real or escaped newlines depending on the span encoding."""
+    """Board text may arrive with real or escaped newlines (and escaped ★) depending on encoding."""
     s = prompt if isinstance(prompt, str) else json.dumps(prompt)
+    s = s.replace("\\u2605", "★").replace("\\u2606", "☆")
     return s.replace("\\n", "\n").split("\n")
 
 
